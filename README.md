@@ -1598,7 +1598,7 @@ The repository includes a low-touch automation model with a human merge gate:
 | Pull-request and main-branch CI | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Python 3.10/3.12 compile, tests, and tracked-secret check |
 | Scheduled health monitor | [`.github/workflows/health-monitor.yml`](.github/workflows/health-monitor.yml) | Weekly test run, diagnostic artifact, and deduplicated failure issue |
 | Dependency updates | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly grouped pip and GitHub Actions pull requests |
-| AI maintainer | Codex desktop automation | Weekday triage and one optional reviewable fix branch per run when the checkout is clean |
+| AI maintainer | Codex desktop automation | Weekday full-queue triage and up to three independent reviewable fix branches per run |
 | Agent safety rules | [`AGENTS.md`](AGENTS.md) | No hardware, secrets, live workcell edits, direct-main pushes, self-merges, or releases |
 
 ### Issue intake and classification
@@ -1614,8 +1614,14 @@ During its scheduled run, Codex may:
 - add an appropriate category or `needs-hardware-validation`;
 - promote a clear, bounded, offline-reproducible software issue to
   `codex-ready`;
-- process at most one autonomously promoted issue into a tested draft pull
-  request.
+- map ready issues to existing branches and pull requests so work is not
+  duplicated;
+- process up to three independent eligible issues, with one isolated branch,
+  test run, and draft pull request per issue.
+
+Issues that overlap in files, behavior, or validation are not combined.
+Automation processes the highest-priority one and leaves the others queued with
+a conflict note.
 
 Codex must leave an issue for maintainer review when it involves security,
 dependencies, GitHub workflows or permissions, releases, destructive data

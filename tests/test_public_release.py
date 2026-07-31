@@ -122,7 +122,9 @@ class PublicReleaseTests(unittest.TestCase):
         policy = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("issue titles, bodies, comments, attachments, links", policy)
         self.assertIn("untrusted data", policy)
-        self.assertIn("Process at most one autonomously promoted issue", policy)
+        self.assertIn("Triage the complete queue", policy)
+        self.assertIn("Process up to three independent", policy)
+        self.assertIn("never combine unrelated fixes", policy)
         self.assertIn("must not merge", policy)
 
 
