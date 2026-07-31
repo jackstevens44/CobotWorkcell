@@ -22,7 +22,7 @@ Link the issue and include the smallest reproducible case.
 ## Validation
 
 - [ ] Regression tests added or updated
-- [ ] `PYTHONPATH=. python -m unittest discover -s tests`
+- [ ] `python3 scripts/run_offline_checks.py`
 - [ ] `git diff --check`
 - [ ] Physical testing still required is listed below
 
