@@ -1305,8 +1305,12 @@ The browser communicates with the local Python server. The server owns the workc
 ### Run everything
 
 ```bash
-PYTHONPATH=. python3 -m unittest discover -s tests
+python3 scripts/run_offline_checks.py
 ```
+
+The runner creates a disposable Python 3 virtual environment, installs the
+declared dependencies, then compiles the source, runs `git diff --check`, and
+runs the offline suite. It does not access robot or camera hardware.
 
 The current suite contains 146 offline tests.
 

@@ -20,8 +20,13 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
-PYTHONPATH=. python3 -m unittest discover -s tests
+python3 scripts/run_offline_checks.py
 ```
+
+The validation runner creates its own disposable Python 3 environment, so it
+also works from a fresh checkout without relying on the active shell's
+interpreter or installed packages. It only installs `requirements.txt` and
+runs static and offline checks; it does not access robot or camera hardware.
 
 ## Pull requests
 
