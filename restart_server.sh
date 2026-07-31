@@ -7,28 +7,33 @@
 # You do NOT need this for frontend edits (static/*) or scene edits in the UI —
 # just reload the browser for those.
 #
-# Override the defaults if needed:
+# Select a robot and Python interpreter when needed:
 #   ROBOT_PORT=/dev/cu.usbserial-XXXX WEB_PORT=8768 BAUD=115200 ./restart_server.sh
 #   FOREGROUND=1 ./restart_server.sh
 
 set -u
-PORT="${ROBOT_PORT:-/dev/cu.usbserial-5B090250681}"
+PORT="${ROBOT_PORT:-}"
 WEB_PORT="${WEB_PORT:-8768}"
 BAUD="${BAUD:-115200}"
-PY="${PYTHON_BIN:-/Users/jackstevens/opt/anaconda3/bin/python3}"
+PY="${PYTHON_BIN:-python3}"
 FOREGROUND="${FOREGROUND:-0}"
 cd "$(dirname "$0")"
 
-if [ ! -x "$PY" ]; then
+if ! command -v "$PY" >/dev/null 2>&1; then
   echo "Python not found or not executable: $PY"
   exit 1
 fi
 
 echo "Stopping any running server..."
-pkill -f "web_server.py --port" 2>/dev/null || true
+pkill -f "web_server.py.*--web-port $WEB_PORT" 2>/dev/null || true
 # Also force-kill anything still holding the web port or serial device — covers
 # orphaned/detached instances whose command line pkill didn't match.
-for pid in $(lsof -nP -iTCP:"$WEB_PORT" -t 2>/dev/null) $(lsof -nP -t "$PORT" 2>/dev/null); do
+web_pids="$(lsof -nP -iTCP:"$WEB_PORT" -t 2>/dev/null || true)"
+serial_pids=""
+if [ -n "$PORT" ]; then
+  serial_pids="$(lsof -nP -t "$PORT" 2>/dev/null || true)"
+fi
+for pid in $web_pids $serial_pids; do
   kill -9 "$pid" 2>/dev/null || true
 done
 # Wait until the web port is actually free before rebinding.
@@ -37,13 +42,20 @@ for _ in $(seq 1 25); do
   sleep 0.2
 done
 
-echo "Starting server on :$WEB_PORT  (robot $PORT @ $BAUD)..."
-if [ "$FOREGROUND" = "1" ]; then
-  echo "Running in foreground. Press Ctrl-C to stop."
-  exec "$PY" web_server.py --port "$PORT" --baud "$BAUD" --web-port "$WEB_PORT"
+server_args=(web_server.py --baud "$BAUD" --web-port "$WEB_PORT")
+robot_status="disconnected (select a port in the dashboard)"
+if [ -n "$PORT" ]; then
+  server_args+=(--port "$PORT")
+  robot_status="$PORT @ $BAUD"
 fi
 
-nohup "$PY" web_server.py --port "$PORT" --baud "$BAUD" --web-port "$WEB_PORT" > /tmp/mycobot_web.log 2>&1 &
+echo "Starting server on :$WEB_PORT  (robot $robot_status)..."
+if [ "$FOREGROUND" = "1" ]; then
+  echo "Running in foreground. Press Ctrl-C to stop."
+  exec "$PY" "${server_args[@]}"
+fi
+
+nohup "$PY" "${server_args[@]}" > /tmp/mycobot_web.log 2>&1 &
 server_pid="$!"
 
 # Wait for it to answer (pymycobot import can take a couple seconds).

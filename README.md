@@ -1049,7 +1049,8 @@ Supported variables:
 
 ### Restart-script variables
 
-`restart_server.sh` is a developer convenience script and contains machine-specific defaults. Override them:
+`restart_server.sh` is a portable developer convenience script. It starts disconnected
+with `python3` by default; provide a robot port or interpreter only when needed:
 
 | Variable | Purpose |
 | --- | --- |
@@ -1070,7 +1071,8 @@ FOREGROUND=1 \
 ./restart_server.sh
 ```
 
-Prefer the direct `python3 web_server.py` command on a new computer until these overrides are understood.
+Running the script without `ROBOT_PORT` is safe for offline dashboard use. Select a
+detected robot port later in the Robot inspector.
 
 ---
 
