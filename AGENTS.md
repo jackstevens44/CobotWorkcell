@@ -19,7 +19,7 @@ These rules apply to human-assisted and automated coding agents.
 
 - Preserve unrelated worktree changes.
 - Add a regression test for every reproducible bug fix.
-- Run `PYTHONPATH=. python -m unittest discover -s tests` and `git diff --check`.
+- Run `python3 scripts/run_offline_checks.py`; it creates a disposable Python 3 environment, installs the declared dependencies, then runs the complete offline suite, static compilation, and `git diff --check`.
 - State what was tested offline and what still requires operator-controlled physical validation.
 - Automated changes must use a dedicated branch and pull request.
 - Never push directly to `main`, merge a pull request, tag a version, or publish a release without maintainer approval.
