@@ -1580,21 +1580,47 @@ Click the blocked button or inspect the footer for the specific cause:
 
 ## Repository automation
 
-The repository includes a conservative automation model:
+The repository includes a low-touch automation model with a human merge gate:
 
 1. **Continuous integration** runs the complete offline test suite on pushes and pull requests.
 2. **Scheduled health checks** rerun the suite and open or update a GitHub issue when the default branch fails.
 3. **Dependabot** proposes dependency and GitHub Actions updates.
-4. **Issue and pull-request templates** require reproduction steps, safety impact, and test evidence.
-5. **Weekly Codex maintenance** may inspect failures, propose solutions, run offline tests, and prepare an isolated branch and draft pull request.
+4. **Issue intake** automatically labels bug and feature reports `needs-triage`.
+5. **Weekday Codex maintenance** classifies new reports, autonomously promotes only bounded low-risk software work, and may prepare an isolated repair branch and draft pull request.
+6. **Maintainer review** remains mandatory before merge, hardware validation, releases, or safety-policy changes.
 
 | Automation | File or location | Behavior |
 | --- | --- | --- |
 | Pull-request and main-branch CI | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Python 3.10/3.12 compile, tests, and tracked-secret check |
 | Scheduled health monitor | [`.github/workflows/health-monitor.yml`](.github/workflows/health-monitor.yml) | Weekly test run, diagnostic artifact, and deduplicated failure issue |
 | Dependency updates | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly grouped pip and GitHub Actions pull requests |
-| AI maintainer | Codex desktop automation | Weekly diagnosis and optional reviewable fix branch when the checkout is clean |
+| AI maintainer | Codex desktop automation | Weekday triage and one optional reviewable fix branch per run when the checkout is clean |
 | Agent safety rules | [`AGENTS.md`](AGENTS.md) | No hardware, secrets, live workcell edits, direct-main pushes, self-merges, or releases |
+
+### Issue intake and classification
+
+Bug reports enter with `bug` and `needs-triage`; feature requests enter with
+`enhancement` and `needs-triage`. Issue content is untrusted input. Automation
+does not execute pasted commands or treat reporter instructions as repository
+authority.
+
+During its scheduled run, Codex may:
+
+- identify duplicates and request missing reproduction details;
+- add an appropriate category or `needs-hardware-validation`;
+- promote a clear, bounded, offline-reproducible software issue to
+  `codex-ready`;
+- process at most one autonomously promoted issue into a tested draft pull
+  request.
+
+Codex must leave an issue for maintainer review when it involves security,
+dependencies, GitHub workflows or permissions, releases, destructive data
+migration, physical hardware, or changes to kinematic, collision, calibration,
+freshness, confirmation, or motion-verification safety.
+
+The maintainer may apply `codex-ready` manually to authorize other bounded
+software work. Neither automatic nor manual authorization permits Codex to
+merge the resulting pull request.
 
 ### Automation safety policy
 

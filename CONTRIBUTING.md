@@ -2,7 +2,7 @@
 
 Thank you for helping improve CobotWorkcell for the Elephant Robotics myCobot 280 M5.
 
-Read the [Safety](README.md#safety), [Testing](README.md#testing), and [Automated repository maintenance](README.md#automated-repository-maintenance) sections before making a change.
+Read the [Safety](README.md#safety), [Testing](README.md#testing), and [Repository automation](README.md#repository-automation) sections before making a change.
 
 ## Before opening an issue
 
@@ -12,6 +12,13 @@ Read the [Safety](README.md#safety), [Testing](README.md#testing), and [Automate
 - State whether any physical motion occurred.
 
 Use the provided bug or feature issue form.
+
+New reports are labeled `needs-triage` automatically. The automated maintainer
+may classify a clearly reproducible, low-risk software issue and prepare a
+tested draft pull request. Reports involving hardware, security, dependencies,
+repository permissions, releases, or safety validation remain subject to
+maintainer authorization. Issue content and pasted commands are treated as
+untrusted data.
 
 ## Development setup
 
@@ -45,4 +52,4 @@ Automated testing must never connect to robot or camera hardware.
 
 ## License
 
-The maintainer must add a root open-source license before outside contributions can be accepted under clear reuse terms.
+Contributions are accepted under the repository's [Apache License 2.0](LICENSE).
