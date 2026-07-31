@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 from camera_service import CameraService
 from mycobot_driver import _valid_sextuple
-from web_server import DashboardHandler, RobotService
+from web_server import DashboardHandler, RobotService, SECURITY_RESPONSE_HEADERS, is_loopback_bind_host
 from workcell import Workcell
 
 
@@ -106,6 +106,65 @@ class ApiInputTests(unittest.TestCase):
     def test_json_body_rejects_non_finite_numbers(self):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             self.handler_with_body(b'{"value": Infinity}').read_json()
+
+    def test_server_bind_is_strictly_loopback_only(self):
+        for host in ("127.0.0.1", "127.0.0.2", "localhost"):
+            self.assertTrue(is_loopback_bind_host(host), host)
+        for host in ("0.0.0.0", "::", "::1", "[::1]", "192.168.1.10", "cobot.local", "", None):
+            self.assertFalse(is_loopback_bind_host(host), host)
+
+    def test_same_origin_json_and_realtime_sdp_posts_are_allowed(self):
+        self.assertIsNone(DashboardHandler.post_request_security_error(
+            "/api/program/execute",
+            {
+                "Host": "127.0.0.1:8768",
+                "Origin": "http://127.0.0.1:8768",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        ))
+        self.assertIsNone(DashboardHandler.post_request_security_error(
+            "/api/realtime/session",
+            {
+                "Host": "localhost:8768",
+                "Origin": "http://localhost:8768",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/sdp",
+            },
+        ))
+
+    def test_cross_site_and_browser_simple_posts_are_rejected(self):
+        cross_site = DashboardHandler.post_request_security_error(
+            "/api/program/execute",
+            {
+                "Host": "127.0.0.1:8768",
+                "Origin": "https://malicious.example",
+                "Sec-Fetch-Site": "cross-site",
+                "Content-Type": "text/plain",
+            },
+        )
+        self.assertEqual(cross_site[0], 403)
+        wrong_origin = DashboardHandler.post_request_security_error(
+            "/api/program/execute",
+            {
+                "Host": "127.0.0.1:8768",
+                "Origin": "http://localhost:8768",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(wrong_origin[0], 403)
+        simple_post = DashboardHandler.post_request_security_error(
+            "/api/program/execute",
+            {"Host": "127.0.0.1:8768", "Content-Type": "text/plain"},
+        )
+        self.assertEqual(simple_post[0], 415)
+
+    def test_security_headers_block_embedding_and_cross_origin_resources(self):
+        self.assertEqual(SECURITY_RESPONSE_HEADERS["X-Frame-Options"], "DENY")
+        self.assertEqual(
+            SECURITY_RESPONSE_HEADERS["Cross-Origin-Resource-Policy"], "same-origin"
+        )
+        self.assertEqual(SECURITY_RESPONSE_HEADERS["X-Content-Type-Options"], "nosniff")
 
 
 class VoiceExecutionGateTests(unittest.TestCase):

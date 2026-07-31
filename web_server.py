@@ -12,6 +12,7 @@ Then open:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import mimetypes
@@ -88,6 +89,27 @@ PROGRAM_GRIPPER_RECOVERY_ATTEMPTS = 3
 PROGRAM_GRIPPER_TIMEOUT_S = 3.0
 COORD_TARGET_TOLERANCE_MM = 3.0
 COORD_RPY_TOLERANCE_DEG = 3.0
+SECURITY_RESPONSE_HEADERS = {
+    "Cache-Control": "no-store",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(self), microphone=(self)",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+
+
+def is_loopback_bind_host(host: Any) -> bool:
+    """Return true only for an explicit local-only HTTP bind address."""
+    candidate = str(host or "").strip().lower().rstrip(".")
+    if candidate == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(candidate)
+        return isinstance(address, ipaddress.IPv4Address) and address.is_loopback
+    except ValueError:
+        return False
 
 
 def json_safe(value: Any, _active: Optional[set] = None, _depth: int = 0) -> Any:
@@ -2796,6 +2818,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     realtime_pending_runs: Dict[str, Dict[str, Any]] = {}
     realtime_plan_lock = threading.Lock()
 
+    def end_headers(self) -> None:
+        for name, value in SECURITY_RESPONSE_HEADERS.items():
+            self.send_header(name, value)
+        super().end_headers()
+
     def log_message(self, fmt: str, *args: Any) -> None:
         if self.path.startswith(("/api/angles", "/api/camera/tag-tracks", "/api/camera/status")):
             return
@@ -2943,6 +2970,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _do_POST(self) -> None:
         parsed = urlparse(self.path)
+        security_error = self.post_request_security_error(parsed.path, self.headers)
+        if security_error is not None:
+            status, message = security_error
+            self.write_json({"ok": False, "error": message}, status=status)
+            return
 
         if parsed.path == "/api/realtime/session":
             self.create_realtime_session()
@@ -3177,6 +3209,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.write_json({"ok": True, "quality": result.get("quality"), "calibration": saved.get("calibration")})
             return
         self.write_json({"ok": False, "error": f"Unknown API endpoint: {parsed.path}"}, status=404)
+
+    @staticmethod
+    def post_request_security_error(path: str, headers: Any) -> Optional[Tuple[int, str]]:
+        """Reject cross-site or browser-simple POSTs before they reach hardware APIs."""
+        fetch_site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            return 403, "Cross-site API requests are not allowed."
+
+        origin = str(headers.get("Origin") or "").strip()
+        if origin:
+            host = str(headers.get("Host") or "").strip().lower()
+            parsed_origin = urlparse(origin)
+            if (
+                parsed_origin.scheme not in {"http", "https"}
+                or not host
+                or parsed_origin.netloc.lower() != host
+            ):
+                return 403, "Request origin does not match the dashboard."
+
+        expected_type = (
+            "application/sdp" if path == "/api/realtime/session" else "application/json"
+        )
+        supplied_type = str(headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if supplied_type != expected_type:
+            return 415, f"Content-Type must be {expected_type}."
+        return None
 
     def plan_program_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
         steps = body.get("steps")
@@ -4173,7 +4231,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", help="Robot serial port, for example /dev/cu.usbserial-XXXXXXXX")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=0.8)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Loopback bind address only (127.0.0.1 or localhost).",
+    )
     parser.add_argument("--web-port", type=int, default=8765)
     parser.add_argument("--list", action="store_true", help="List serial ports and exit")
     return parser
@@ -4183,6 +4245,13 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.list:
         return list_serial_ports()
+    if not is_loopback_bind_host(args.host):
+        print(
+            "Refusing non-loopback HTTP binding. CobotWorkcell exposes physical-control "
+            "endpoints and does not provide remote authentication."
+        )
+        print("Use --host 127.0.0.1 and access the dashboard only from this computer.")
+        return 2
 
     DashboardHandler.service = RobotService(args.port, args.baud, args.timeout)
     DashboardHandler.scene = Workcell(ROOT / "data")
