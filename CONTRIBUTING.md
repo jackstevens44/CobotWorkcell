@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for helping improve the myCobot 280 Spatial Workcell.
+Thank you for helping improve CobotWorkcell for the Elephant Robotics myCobot 280 M5.
 
 Read the [Safety](README.md#safety), [Testing](README.md#testing), and [Automated repository maintenance](README.md#automated-repository-maintenance) sections before making a change.
 

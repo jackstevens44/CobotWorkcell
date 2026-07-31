@@ -1,18 +1,18 @@
-# myCobot 280 Spatial Workcell
+# CobotWorkcell
 
-> A local, camera-aware control and programming platform for the Elephant Robotics myCobot 280 M5.
+> An open-source, camera-aware control and programming platform for the Elephant Robotics myCobot 280 M5.
 
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Offline CI configured](static/docs/offline-ci-badge.svg)](https://github.com/jackstevens44/AI-Workcell-M5-Cobot-Stack/actions/workflows/ci.yml)
+[![Offline CI configured](static/docs/offline-ci-badge.svg)](https://github.com/jackstevens44/CobotWorkcell/actions/workflows/ci.yml)
 [![Robot](https://img.shields.io/badge/Robot-myCobot%20280%20M5-2563EB)](https://www.elephantrobotics.com/en/mycobot-en/)
 [![Control](https://img.shields.io/badge/Control-Local%20first-0F766E)](#privacy)
-[![Tests](https://img.shields.io/badge/Offline%20tests-146%20passing-15803D)](#testing)
+[![Tests](https://img.shields.io/badge/Offline%20tests-149%20passing-15803D)](#testing)
 
 > ⚠️ **Early development:** This project is under active development and is not a safety-rated robot controller. Expect changes, test at reduced speed, and supervise every physical motion.
 
 **Initial launch:** July 30, 2026
 
-The myCobot 280 Spatial Workcell combines a browser-based digital twin, a visual robot programmer, deterministic AprilTag object tracking, calibrated tool geometry, guarded robot jogging, spatial AI commands, and independently validated pick-and-place planning.
+CobotWorkcell combines a browser-based digital twin, a visual robot programmer, deterministic AprilTag object tracking, calibrated tool geometry, guarded robot jogging, spatial AI commands, and independently validated pick-and-place planning for the Elephant Robotics myCobot 280 M5.
 
 It is designed for one small tabletop workcell and one important safety principle:
 
@@ -76,8 +76,8 @@ The project has been developed and tested on macOS.
 ### 1. Download and install
 
 ```bash
-git clone https://github.com/jackstevens44/AI-Workcell-M5-Cobot-Stack.git
-cd AI-Workcell-M5-Cobot-Stack
+git clone https://github.com/jackstevens44/CobotWorkcell.git
+cd CobotWorkcell
 
 python3 -m venv .venv
 source .venv/bin/activate
