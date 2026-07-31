@@ -3,7 +3,7 @@
 Local web dashboard for the myCobot 280 M5.
 
 Run:
-    python3 web_server.py --port /dev/cu.usbserial-5B090250681
+    python3 web_server.py --port /dev/cu.usbserial-XXXXXXXX
 
 Then open:
     http://127.0.0.1:8765
@@ -4170,7 +4170,7 @@ def multipart_body(boundary: str, fields: Any) -> bytes:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the myCobot digital twin web dashboard.")
-    parser.add_argument("--port", help="Robot serial port, for example /dev/cu.usbserial-5B090250681")
+    parser.add_argument("--port", help="Robot serial port, for example /dev/cu.usbserial-XXXXXXXX")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=0.8)
     parser.add_argument("--host", default="127.0.0.1")
