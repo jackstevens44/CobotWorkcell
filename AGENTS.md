@@ -33,7 +33,9 @@ These rules apply to human-assisted and automated coding agents.
 - Keep ambiguous reports in `needs-triage` and request the minimum missing information.
 - Apply `needs-hardware-validation` when correctness ultimately depends on a robot, camera, gripper, pump, serial device, or calibrated physical workcell.
 - Leave security, dependency, GitHub workflow, repository-permission, release, kinematic-safety, collision, freshness, confirmation, and motion-verification decisions for maintainer authorization.
-- Process at most one autonomously promoted issue per scheduled run.
+- Triage the complete queue, map every `codex-ready` issue to existing branches and pull requests, and never create duplicate work.
+- Process up to three independent `codex-ready` issues per scheduled run. Use a separate worktree, branch, test run, commit, and draft pull request for each issue; never combine unrelated fixes.
+- When issues overlap in files, behavior, or required validation, process the highest-priority issue and leave the others queued with a concise conflict note.
 - A successful autonomous repair must remove `needs-triage`, add `codex-ready` and `in-progress` as appropriate, create an isolated branch, add a regression test, and open a draft pull request. It must not merge or close the issue as fixed.
 
 ## Release policy
