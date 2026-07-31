@@ -1,0 +1,20 @@
+# Secrets
+api_keys.env
+.env
+
+# Machine-specific workcell state
+data/workcell.json
+data/workcell.backup.json
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated previews
+tmp/
+
+# Local tooling
+.claude/
+
+# macOS
+.DS_Store

@@ -1,0 +1,10 @@
+{
+  "version": 0,
+  "counter": 1,
+  "parts": [],
+  "registeredParts": [],
+  "bins": [],
+  "taughtPoints": [],
+  "programs": [],
+  "endEffector": "adaptive_gripper"
+}

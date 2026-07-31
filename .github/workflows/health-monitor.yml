@@ -1,0 +1,97 @@
+name: Scheduled repository health
+
+on:
+  schedule:
+    - cron: "17 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: scheduled-repository-health
+  cancel-in-progress: false
+
+jobs:
+  offline-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run complete offline suite
+        id: tests
+        continue-on-error: true
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -o pipefail
+          python -m compileall -q .
+          python -m unittest discover -s tests 2>&1 | tee offline-test.log
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-offline-test-log
+          path: offline-test.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Open or update health issue
+        if: steps.tests.outcome == 'failure'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const title = "[Automated health] Offline suite failing";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              "The scheduled offline repository-health check failed.",
+              "",
+              `- Commit: \`${context.sha}\``,
+              `- Workflow run: ${runUrl}`,
+              "- Hardware access: none",
+              "- Full log: workflow artifact `scheduled-offline-test-log`",
+              "",
+              "A maintainer or coding agent should reproduce this on an isolated branch, add a regression test, run the complete offline suite, and open a pull request. Do not connect to a robot or camera."
+            ].join("\n");
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              ...context.repo,
+              state: "open",
+              per_page: 100
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: existing.number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo,
+                title,
+                body
+              });
+            }
+
+      - name: Fail after reporting
+        if: steps.tests.outcome == 'failure'
+        run: exit 1

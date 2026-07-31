@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>myCobot 280 Workcell</title>
+    <link rel="stylesheet" href="/styles.css?v=42">
+  </head>
+  <body>
+    <div class="workcell">
+      <header class="toolbar">
+        <div class="toolbar-title">
+          <h1>myCobot 280 Workcell</h1>
+          <p id="statusText">Starting...</p>
+        </div>
+        <div class="toolbar-actions">
+          <button id="openProgrammerBtn" type="button">Program</button>
+          <div class="status-pill" id="connectionPill">Offline</div>
+          <button id="stopBtn" type="button" class="danger big">STOP</button>
+        </div>
+      </header>
+
+      <div class="main-row">
+        <aside class="tree-panel">
+          <div class="tree-section">
+            <button id="treeRobot" type="button" class="tree-item tree-root">Robot</button>
+          </div>
+          <div class="tree-section">
+            <div class="tree-header">
+              <span>Parts</span>
+              <button id="addPartBtn" type="button" title="Add part">+</button>
+            </div>
+            <div id="partList"></div>
+          </div>
+          <div class="tree-section">
+            <div class="tree-header">
+              <span>Bins</span>
+              <button id="addBinBtn" type="button" title="Add bin">+</button>
+            </div>
+            <div id="binList"></div>
+          </div>
+          <div class="tree-section">
+            <div class="tree-header">
+              <span>Points</span>
+              <button id="addPointBtn" type="button" title="Teach a robot point">+</button>
+            </div>
+            <div id="pointList"></div>
+          </div>
+          <div class="tree-section">
+            <div class="tree-header">
+              <span>Programs</span>
+              <button id="addProgramBtn" type="button" title="New program">+</button>
+            </div>
+            <div id="programList"></div>
+          </div>
+        </aside>
+
+        <section class="viewport-panel">
+          <div id="robotViewport" aria-label="myCobot 280 3D workcell"></div>
+        </section>
+
+        <aside class="inspector-panel">
+          <div class="inspector-tabs">
+            <button id="tabInspector" type="button" class="active">Inspector</button>
+            <button id="tabCamera" type="button">Camera</button>
+            <button id="tabAI" type="button">AI Assistant</button>
+          </div>
+
+          <div id="inspectorTab">
+            <div id="objectInspector" class="inspector-content" style="display:none"></div>
+            <div id="robotInspector" class="inspector-content">
+              <h3>Robot</h3>
+              <div class="field-row">
+                <label for="portSelect">Port</label>
+                <div class="inline-row">
+                  <select id="portSelect"></select>
+                  <button id="refreshPortsBtn" type="button">↻</button>
+                </div>
+              </div>
+              <div class="field-row">
+                <label for="baudInput">Baud</label>
+                <input id="baudInput" type="number" value="115200" min="9600" step="1">
+              </div>
+              <div class="field-row">
+                <label for="endEffectorSelect">End Effector</label>
+                <select id="endEffectorSelect">
+                  <option value="adaptive_gripper">Adaptive Gripper</option>
+                  <option value="suction_gripper">Air Suction Gripper</option>
+                </select>
+              </div>
+              <button id="connectBtn" type="button" class="primary">Use Port</button>
+              <div class="button-grid two">
+                <button id="captureToolOrientationBtn" type="button">Capture Tool Orientation</button>
+                <button id="clearToolOrientationBtn" type="button">Runtime Orientation</button>
+              </div>
+              <div id="toolOrientationStatus" class="helper-text">Coordinate moves use captured tool orientation when saved.</div>
+              <details class="inspector-section" open>
+                <summary>Coordinate Pick Calibration</summary>
+                <div class="inspector-section-body">
+                  <div class="field-row">
+                    <label for="pickHeightBiasInput">Pick Z Bias</label>
+                    <input id="pickHeightBiasInput" type="number" value="0" min="-8" max="8" step="1">
+                  </div>
+                  <div class="field-row">
+                    <label for="minimumTableClearanceInput">Minimum Table Clearance</label>
+                    <input id="minimumTableClearanceInput" type="number" value="4" min="2" max="12" step="1">
+                  </div>
+                  <div class="button-grid two">
+                    <button id="savePickCalibrationBtn" type="button">Save Pick Calibration</button>
+                    <button id="resetPickCalibrationBtn" type="button">Reset</button>
+                  </div>
+                  <div id="pickCalibrationStatus" class="helper-text">Values are millimeters. Positive Pick Z Bias raises the modeled jaw center.</div>
+                </div>
+              </details>
+              <details class="inspector-section">
+                <summary>Tool Contact Calibration</summary>
+                <div class="inspector-section-body">
+                  <div class="helper-text">After a centered test, enter where the tool actually landed. Positive means left, forward, or high; negative means right, back, or low.</div>
+                  <div class="field-grid three">
+                    <div class="field-row"><label for="toolMissLeftInput">Left / Right</label><input id="toolMissLeftInput" type="number" value="0" min="-30" max="30" step="0.5"></div>
+                    <div class="field-row"><label for="toolMissForwardInput">Forward / Back</label><input id="toolMissForwardInput" type="number" value="0" min="-30" max="30" step="0.5"></div>
+                    <div class="field-row"><label for="toolMissHighInput">High / Low</label><input id="toolMissHighInput" type="number" value="0" min="-30" max="30" step="0.5"></div>
+                  </div>
+                  <div class="button-grid two">
+                    <button id="applyToolContactCalibrationBtn" type="button">Apply Observed Miss</button>
+                    <button id="resetToolContactCalibrationBtn" type="button">Reset Tool Correction</button>
+                  </div>
+                  <div id="toolContactCalibrationStatus" class="helper-text">Corrections are saved separately for each end effector.</div>
+                </div>
+              </details>
+              <div class="button-grid">
+                <button id="powerOnBtn" type="button">Power On</button>
+                <button id="focusBtn" type="button">Focus</button>
+                <button id="releaseBtn" type="button">Release</button>
+                <button id="homePoseBtn" type="button">Home</button>
+                <button id="gripperOpenBtn" type="button">Grip Open</button>
+                <button id="gripperAutoBtn" type="button">Auto Grip</button>
+                <button id="gripperCloseBtn" type="button">Grip Close</button>
+              </div>
+              <details class="inspector-section">
+                <summary>Suction Diagnostics</summary>
+                <div class="inspector-section-body">
+                  <div class="button-grid two">
+                    <button id="suctionPumpOnBtn" type="button">Pump On</button>
+                    <button id="suctionPumpOffBtn" type="button">Pump Off</button>
+                    <button id="suctionValveOpenBtn" type="button">Valve Open</button>
+                    <button id="suctionValveCloseBtn" type="button">Valve Close</button>
+                    <button id="suctionFullOnBtn" type="button">Suction On</button>
+                    <button id="suctionFullOffBtn" type="button">Suction Off</button>
+                  </div>
+                  <div id="suctionDiagStatus" class="helper-text">Pump 2.0 needs its pump power connection as well as base IO. Control harness: GND→GND, 5V→5V, G2→2, G5→5. pin 5 is Pump; pin 2 is Release Valve; both are active-low.</div>
+                </div>
+              </details>
+              <div class="section-header">
+                <h4>Joint Jog</h4>
+                <label class="speed-label">Speed <input id="speedInput" type="number" value="20" min="1" max="100"></label>
+              </div>
+              <div id="jointInputs" class="joint-list"></div>
+              <div class="inline-row">
+                <button id="useCurrentBtn" type="button">Use Current</button>
+                <button id="sendBtn" type="button" class="primary">Send Angles</button>
+              </div>
+              <h4>Measured Angles</h4>
+              <div id="angleReadout" class="readout-grid"></div>
+            </div>
+          </div>
+
+          <div id="cameraTab" style="display:none">
+            <div class="inspector-content">
+              <h3>Camera View</h3>
+              <div id="cameraStatus" class="helper-text">Checking...</div>
+              <div class="camera-preview">
+                <img id="cameraPreview" alt="External camera preview">
+                <div id="cameraPreviewEmpty" class="camera-preview-empty">No live frame</div>
+              </div>
+              <div class="field-row">
+                <label for="cameraDeviceSelect">Camera</label>
+                <select id="cameraDeviceSelect"></select>
+              </div>
+              <div class="helper-text">External USB cameras only. Built-in Mac and Continuity/iPhone cameras are blocked.</div>
+              <div class="inline-row">
+                <button id="cameraRefreshBtn" type="button">Find Cameras</button>
+                <button id="cameraStartBtn" type="button" class="primary">Start</button>
+                <button id="cameraStopBtn" type="button">Stop</button>
+              </div>
+              <button id="openCameraCalibrationBtn" type="button" class="primary calibration-launch">Calibrate Camera</button>
+              <div id="cameraCalibrationSummary" class="helper-text">Camera calibration has not been completed.</div>
+              <h4>Object Tracking</h4>
+              <div class="helper-text">AprilTags 10–25 track configured parts continuously. No background AI classification runs.</div>
+            </div>
+          </div>
+
+          <dialog id="cameraCalibrationDialog" class="calibration-dialog">
+            <div class="calibration-shell">
+              <header class="calibration-header">
+                <div><div class="eyebrow">Guided setup</div><h2>Calibrate the Camera</h2></div>
+                <button id="closeCameraCalibrationBtn" type="button" aria-label="Close calibration">Close</button>
+              </header>
+              <div class="calibration-progress" aria-label="Calibration progress">
+                <span data-wizard-dot="1">1</span><span data-wizard-dot="2">2</span><span data-wizard-dot="3">3</span><span data-wizard-dot="4">4</span><span data-wizard-dot="5">5</span><span data-wizard-dot="6">6</span>
+              </div>
+
+              <section class="calibration-step" data-calibration-step="1">
+                <div class="step-kicker">Step 1 of 6</div><h3>Print the calibration set</h3>
+                <p>Print both PDFs using <strong>Actual Size</strong> or <strong>100%</strong>. Turn off Fit to Page. The measurements must be exact.</p>
+                <div class="print-card-grid">
+                  <a class="print-card" href="/calibration-assets/mycobot_charuco_board.pdf" target="_blank"><strong>ChArUco photo board</strong><span>Used for the 12 lens-calibration photos. Confirm it measures 210 x 150 mm.</span></a>
+                  <a class="print-card" href="/calibration-assets/mycobot_workspace_tags.pdf" target="_blank"><strong>Workspace tags 0-3</strong><span>Permanent reference markers. Confirm every black square measures 50 x 50 mm.</span></a>
+                </div>
+                <label class="wizard-check"><input id="printsMeasuredCheck" type="checkbox"> I printed at 100% and verified the dimensions with a ruler.</label>
+              </section>
+
+              <section class="calibration-step" data-calibration-step="2" hidden>
+                <div class="step-kicker">Step 2 of 6</div><h3>Place and measure the reference tags</h3>
+                <div class="origin-callout"><strong>Where is X=0, Y=0?</strong><br>The XY origin is the center of the robot's first rotating joint (J1), projected straight down onto the work surface. It is <em>not</em> the front edge of the base. +X points straight forward from the robot and +Y points to the robot's left.</div>
+                <p>Put tags 0-3 flat near the workspace corners. Measure from that projected J1 center to the <strong>center of each black tag</strong>. Enter meters; right of the robot is negative Y.</p>
+                <div class="fiducial-marker-grid">
+                  <strong>ID</strong><strong>X meters</strong><strong>Y meters</strong><strong>Yaw°</strong>
+                  <span>0</span><input id="tag0X" type="number" step="0.001" value="0.30"><input id="tag0Y" type="number" step="0.001" value="0.22"><input id="tag0Yaw" type="number" step="1" value="0">
+                  <span>1</span><input id="tag1X" type="number" step="0.001" value="0.30"><input id="tag1Y" type="number" step="0.001" value="-0.22"><input id="tag1Yaw" type="number" step="1" value="0">
+                  <span>2</span><input id="tag2X" type="number" step="0.001" value="0.05"><input id="tag2Y" type="number" step="0.001" value="-0.22"><input id="tag2Yaw" type="number" step="1" value="0">
+                  <span>3</span><input id="tag3X" type="number" step="0.001" value="0.05"><input id="tag3Y" type="number" step="0.001" value="0.22"><input id="tag3Yaw" type="number" step="1" value="0">
+                </div>
+                <button id="fiducialSaveBtn" type="button" class="primary">Save These Measurements</button>
+                <div id="markerMapStatus" class="helper-text">Measurements not saved in this session.</div>
+              </section>
+
+              <section class="calibration-step" data-calibration-step="3" hidden>
+                <div class="step-kicker">Step 3 of 6</div><h3>Take 12 varied photos</h3>
+                <p>Hold the ChArUco board in a different place and angle for every photo: center, four corners, at least two noticeably different distances, tilted left/right, and tilted forward/back. Keep it sharp and fully visible.</p>
+                <div class="capture-layout"><img id="calibrationLivePreview" alt="Live camera calibration preview"><div><div id="captureCount" class="capture-count">0 / 12</div><div class="capture-meter"><span id="captureMeterFill"></span></div><div id="captureGuidance" class="helper-text">Start with the board near the center.</div><button id="charucoCaptureBtn" type="button" class="primary">Take Photo 1</button><button id="charucoRemoveLastBtn" type="button">Remove Last Photo</button><button id="charucoClearBtn" type="button">Start Photos Over</button></div></div>
+                <div id="charucoStatus" class="wizard-result">No photos captured yet.</div>
+              </section>
+
+              <section class="calibration-step" data-calibration-step="4" hidden>
+                <div class="step-kicker">Step 4 of 6</div><h3>Solve and verify</h3>
+                <p>The wizard will correct lens distortion, locate the permanent tags, and verify that the current camera position is stable.</p>
+                <div class="inline-row"><button id="charucoSolveBtn" type="button" class="primary">Solve Lens Calibration</button><button id="fiducialVerifyBtn" type="button">Check Workspace Tags</button><button id="fiducialAcceptPoseBtn" type="button">Lock Camera Position</button></div>
+                <div id="fiducialStatus" class="wizard-result">Complete the checks from left to right.</div>
+                <img id="fiducialDebugPreview" class="camera-debug-preview" alt="Fiducial debug overlay">
+              </section>
+
+              <section class="calibration-step" data-calibration-step="5" hidden>
+                <div class="step-kicker">Step 5 of 6</div><h3>Check accuracy at 9 points</h3>
+                <p>Use one unassigned object tag (ID 10–25) as the calibration target. Move it to nine measured positions across the usable table, enter its expected X/Y, then click <strong>Read Camera</strong>. Practical mode allows 10 mm RMS, 20 mm maximum error, and 5 mm stationary spread. This never moves the robot.</p>
+                <div id="accuracyPointGrid" class="accuracy-point-grid"></div>
+                <div class="inline-row"><button id="verificationReportBtn" type="button" class="primary">Calculate Accuracy</button><button id="skipAccuracyForTestingBtn" type="button">Skip for Testing</button></div>
+                <div id="verificationReportStatus" class="wizard-result">Record all nine points to finish.</div>
+              </section>
+
+              <section class="calibration-step" data-calibration-step="6" hidden>
+                <div class="step-kicker">Step 6 of 6</div><h3>Calibration complete</h3>
+                <div id="cameraCalibrationCompleteMessage" class="success-callout">The camera can now report table objects in robot-base coordinates. Keep the camera, tags, table, and robot base fixed.</div>
+                <label class="wizard-check"><input id="continuousLocalizationInput" type="checkbox" checked> Turn on continuous object localization.</label>
+                <button id="finishCameraCalibrationBtn" type="button" class="primary">Finish</button>
+                <div id="verificationReportStatus" class="helper-text"></div>
+              </section>
+
+              <footer class="calibration-footer"><button id="calibrationBackBtn" type="button">Back</button><span id="calibrationStepHint" class="helper-text"></span><button id="calibrationNextBtn" type="button" class="primary">Next</button></footer>
+            </div>
+          </dialog>
+
+          <dialog id="partWizardDialog" class="calibration-dialog part-wizard-dialog">
+            <form id="partWizardForm" class="calibration-shell" method="dialog">
+              <header class="calibration-header">
+                <div><div class="eyebrow">Spatial part setup</div><h2 id="partWizardTitle">Add a Part</h2></div>
+                <button id="partWizardCloseBtn" type="button">Close</button>
+              </header>
+              <div class="part-wizard-body">
+                <div class="field-row"><label for="partTrackingMode">Tracking</label><select id="partTrackingMode"><option value="apriltag">Track with AprilTag</option><option value="virtual">Virtual only</option></select></div>
+                <section id="partTagPickerSection">
+                  <div class="part-wizard-actions"><a href="/calibration-assets/mycobot_object_tags_10_25.pdf" target="_blank">Print object tags 10–25</a><span id="partTagSelectionStatus" class="helper-text">Click an unbound tag in the camera.</span></div>
+                  <div id="partTagPoseWarning" class="tag-pose-warning" hidden>
+                    <div><strong>The camera position changed.</strong><span>You can still select and assign a visible tag. Robot coordinates stay paused until you relock the camera.</span></div>
+                    <button id="partRelockCameraBtn" type="button">Relock Camera Here</button>
+                  </div>
+                  <div class="tag-picker-stage"><img id="partTagCamera" alt="Live object tag picker"><svg id="partTagOverlay" aria-label="Detected object tags"></svg></div>
+                  <div class="visible-tag-panel">
+                    <div><strong>Select a visible object tag</strong><span class="helper-text">Workspace tags 0–3 are intentionally excluded.</span></div>
+                    <div id="partVisibleTagChoices" class="visible-tag-choices"><span class="helper-text">Looking for object tags 10–25…</span></div>
+                  </div>
+                </section>
+                <div class="field-grid two">
+                  <div class="field-row"><label for="partWizardName">Name</label><input id="partWizardName" required value="Part"></div>
+                  <div class="field-row"><label for="partWizardShape">Shape</label><select id="partWizardShape"><option value="box">Box</option><option value="cylinder">Cylinder</option><option value="sphere">Sphere</option><option value="rectangle">Flat rectangle</option><option value="circle">Flat circle</option></select></div>
+                </div>
+                <div class="field-row"><label for="partWizardUnits">Measurements</label><select id="partWizardUnits"><option value="in">Inches</option><option value="mm">Millimeters</option></select></div>
+                <div class="field-grid three">
+                  <div class="field-row"><label for="partWizardLength">Length</label><input id="partWizardLength" type="number" min="0.01" step="0.01" value="2" required></div>
+                  <div class="field-row"><label for="partWizardWidth">Width</label><input id="partWizardWidth" type="number" min="0.01" step="0.01" value="2" required></div>
+                  <div class="field-row"><label for="partWizardHeight">Height</label><input id="partWizardHeight" type="number" min="0.01" step="0.01" value="2" required></div>
+                </div>
+                <details id="partTagPlacement"><summary>Tag placement on top</summary>
+                  <p class="helper-text">Offsets are measured from the object center along its length (X) and width (Y). Leave both at zero for a centered tag.</p>
+                  <div class="field-grid three">
+                    <div class="field-row"><label for="partTagOffsetX">X offset</label><input id="partTagOffsetX" type="number" step="0.01" value="0"></div>
+                    <div class="field-row"><label for="partTagOffsetY">Y offset</label><input id="partTagOffsetY" type="number" step="0.01" value="0"></div>
+                    <div class="field-row"><label for="partTagYaw">Alignment</label><select id="partTagYaw"><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="-90">-90°</option><option value="custom">Custom</option></select><input id="partTagYawCustom" type="number" min="-180" max="180" step="1" value="0" aria-label="Custom alignment in degrees" hidden></div>
+                  </div>
+                </details>
+                <div class="field-grid two"><div class="field-row"><label for="partWizardColor">Color</label><input id="partWizardColor" type="color" value="#8a63d2"></div><label class="wizard-check"><input id="partWizardGraspable" type="checkbox" checked> Graspable</label></div>
+                <div id="partWizardResult" class="wizard-result">Choose how this part should be tracked.</div>
+              </div>
+              <footer class="calibration-footer"><button id="partWizardCancelBtn" type="button">Cancel</button><span></span><button id="partWizardSaveBtn" type="submit" class="primary">Save Part</button></footer>
+            </form>
+          </dialog>
+
+          <dialog id="pointWizardDialog" class="calibration-dialog point-wizard-dialog">
+            <form id="pointWizardForm" class="calibration-shell" method="dialog">
+              <header class="calibration-header">
+                <div><div class="eyebrow">Hand-guided setup</div><h2>Teach a Robot Point</h2></div>
+                <button id="pointWizardCloseBtn" type="button">Close</button>
+              </header>
+              <div class="part-wizard-body">
+                <p>Release the joints, guide the selected tool to the desired pose, then capture it while the robot is stationary.</p>
+                <div class="field-row"><label for="pointWizardName">Point name</label><input id="pointWizardName" required value="Point 1"></div>
+                <div class="field-row"><label for="pointWizardSurfaceZ">Support surface Z</label><input id="pointWizardSurfaceZ" type="number" value="0" step="1"><span>mm</span></div>
+                <label class="wizard-check"><input id="pointWizardUseDestination" type="checkbox" checked> Allow object placement here</label>
+                <div class="button-grid two">
+                  <button id="pointWizardReleaseBtn" type="button">1. Release Robot</button>
+                  <button id="pointWizardCaptureBtn" type="button" class="primary">2. Capture Current Pose</button>
+                </div>
+                <div id="pointWizardReadout" class="wizard-result">No pose captured yet. The active tool and its calibration are saved with the point.</div>
+              </div>
+              <footer class="calibration-footer"><button id="pointWizardCancelBtn" type="button">Cancel</button><span></span><button id="pointWizardSaveBtn" type="submit" class="primary" disabled>Save Point</button></footer>
+            </form>
+          </dialog>
+
+          <div id="aiTab" style="display:none">
+            <div class="inspector-content">
+              <h3>AI Assistant</h3>
+              <div id="realtimeStatus" class="helper-text">Checking...</div>
+              <div class="inline-row realtime-controls">
+                <button id="realtimeConnectBtn" type="button">Connect</button>
+                <button id="realtimeTalkBtn" type="button" class="primary" disabled>Hold to Talk</button>
+                <button id="realtimeSendBtn" type="button" class="primary">Send</button>
+              </div>
+              <audio id="realtimeAudio" autoplay playsinline></audio>
+              <textarea id="realtimePromptInput" rows="3" placeholder="e.g. plan a program that puts Part 1 in Bin A"></textarea>
+              <pre id="realtimeOutput" class="realtime-output"></pre>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+    </div>
+
+    <dialog id="programWorkspace" class="program-workspace">
+      <div class="program-workspace-shell">
+        <header class="program-workspace-header">
+          <div class="program-title-block">
+            <span class="eyebrow">Robot Programmer</span>
+            <input id="progName" type="text" value="Program 1" aria-label="Program name">
+          </div>
+          <div class="program-header-settings">
+            <label>Repeat <input id="programRepeatCount" type="number" min="1" max="20" value="1"></label>
+            <span id="programDirtyBadge" class="program-badge">Saved</span>
+            <button id="saveProgramBtn" type="button">Save</button>
+            <button id="deleteProgramBtn" type="button">Delete</button>
+            <button id="closeProgrammerBtn" type="button">Close</button>
+          </div>
+        </header>
+
+        <div class="program-workspace-body">
+          <aside class="program-tree-pane">
+            <div class="program-pane-heading">
+              <div><span class="eyebrow">Sequence</span><h2>Program Tree</h2></div>
+              <button id="commandPaletteBtn" type="button" class="primary">Add Command</button>
+            </div>
+            <div id="commandPalette" class="command-palette" hidden>
+              <section><strong>Motion</strong><button data-command="joint">Joint Move</button><button data-command="linear">Linear Move</button><button data-command="home">Home</button></section>
+              <section><strong>Smart Skills</strong><button data-command="pick">Pick Part</button><button data-command="place">Place Object</button></section>
+              <section><strong>Tool</strong><button data-command="acquire">Acquire</button><button data-command="release">Release</button></section>
+              <section><strong>Utility</strong><button data-command="wait">Wait</button></section>
+            </div>
+            <div id="stepList" class="program-tree"></div>
+          </aside>
+
+          <main class="program-center-pane">
+            <div class="program-viewport-toolbar">
+              <span id="programViewportTitle">Live workcell</span>
+              <div class="simulation-transport">
+                <button id="simPreviousBtn" type="button" title="Previous command">◀</button>
+                <button id="simPlayBtn" type="button">Play</button>
+                <button id="simPauseBtn" type="button">Pause</button>
+                <button id="simNextBtn" type="button" title="Next command">▶</button>
+                <button id="simResetBtn" type="button">Reset</button>
+                <button id="simulateFromBtn" type="button">From Here</button>
+              </div>
+            </div>
+            <div id="programViewportHost" class="program-viewport-host"></div>
+            <pre id="planOutput" class="program-validation-output">Add a command, then plan and simulate.</pre>
+          </main>
+
+          <aside class="program-inspector-pane">
+            <div id="programStepInspector" class="program-step-inspector"></div>
+          </aside>
+        </div>
+
+        <footer class="program-workspace-footer">
+          <div class="program-footer-status">
+            <span id="programConnectionState" class="status-pill">Offline</span>
+            <span id="programToolState">Adaptive Gripper</span>
+            <label>Speed override <input id="programSpeedOverride" type="range" min="1" max="100" value="100"><output id="programSpeedOutput">100%</output></label>
+          </div>
+          <span id="runStatus" class="program-run-status"></span>
+          <div class="program-footer-actions">
+            <button id="programStopBtn" type="button" class="danger">STOP</button>
+            <button id="planBtn" type="button" class="primary">Validate &amp; Simulate</button>
+            <button id="runBtn" type="button" class="danger" disabled>Run Complete Program</button>
+          </div>
+        </footer>
+      </div>
+    </dialog>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three/three.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="/js/main.js?v=55"></script>
+    <script>
+      // Inspector tab switching (tiny enough to inline).
+      function showTab(name) {
+        document.querySelector("#inspectorTab").style.display = name === "inspector" ? "" : "none";
+        document.querySelector("#cameraTab").style.display = name === "camera" ? "" : "none";
+        document.querySelector("#aiTab").style.display = name === "ai" ? "" : "none";
+        document.querySelector("#tabInspector").classList.toggle("active", name === "inspector");
+        document.querySelector("#tabCamera").classList.toggle("active", name === "camera");
+        document.querySelector("#tabAI").classList.toggle("active", name === "ai");
+        const panel = document.querySelector(".inspector-panel");
+        if (panel) panel.scrollTop = 0;
+      }
+      document.querySelector("#tabInspector").addEventListener("click", () => {
+        showTab("inspector");
+      });
+      document.querySelector("#tabCamera").addEventListener("click", () => {
+        showTab("camera");
+      });
+      document.querySelector("#tabAI").addEventListener("click", () => {
+        showTab("ai");
+      });
+    </script>
+  </body>
+</html>

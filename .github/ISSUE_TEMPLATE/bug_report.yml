@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a reproducible software defect.
+title: "[Bug]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include API keys, camera IDs, serial IDs, or `data/workcell.json`.
+        Stop physical testing immediately when robot behavior is unexpected.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Start...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: Commit SHA or release version
+    validations:
+      required: true
+
+  - type: dropdown
+    id: physical-motion
+    attributes:
+      label: Did physical robot motion occur?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, browser, robot firmware, end effector, and camera.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or screenshots
+      description: Remove secrets and unique device identifiers.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I stopped physical testing after unexpected behavior.
+          required: true
+        - label: I removed secrets and personal workcell data.
+          required: true

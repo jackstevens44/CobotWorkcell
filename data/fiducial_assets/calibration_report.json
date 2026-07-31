@@ -1,0 +1,34 @@
+{
+  "status": "physical_verification_pending",
+  "dictionary": "DICT_APRILTAG_36h11",
+  "workspaceMarkerSizeMm": 50.0,
+  "syntheticVerification": {
+    "visibleMarkerCount": 4,
+    "coverageRatio": 0.6576270833,
+    "reprojectionRmsPx": 0.0000076,
+    "reprojectionMaxPx": 0.0000142,
+    "detections": 1,
+    "stationaryFilterRequirementTested": true
+  },
+  "physicalVerification": {
+    "charucoSampleCount": 0,
+    "intrinsicRmsPx": null,
+    "verificationPointCount": 0,
+    "rmsXyErrorM": null,
+    "maxXyErrorM": null,
+    "stationarySpreadM": null,
+    "passed": false
+  },
+  "targets": {
+    "minimumVerificationPoints": 9,
+    "maximumRmsXyErrorM": 0.003,
+    "maximumXyErrorM": 0.006,
+    "maximumStationarySpreadM": 0.002
+  },
+  "unmetTargets": [
+    "Install and measure the four physical workspace tags.",
+    "Capture at least 12 diverse ChArUco images.",
+    "Complete the nine-point physical XY verification.",
+    "Measure stationary-object coordinate spread under normal lighting."
+  ]
+}

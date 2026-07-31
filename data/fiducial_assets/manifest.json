@@ -1,0 +1,62 @@
+{
+  "dictionary": "DICT_APRILTAG_36h11",
+  "workspaceMarkerIds": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "workspaceMarkerSizeMm": 50.0,
+  "objectMarkerIds": [
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25
+  ],
+  "objectMarkerSizeMm": 30.0,
+  "printDpi": 300,
+  "printScale": "100%; disable fit-to-page scaling and verify with a ruler",
+  "charuco": {
+    "squaresX": 7,
+    "squaresY": 5,
+    "squareLengthM": 0.03,
+    "markerLengthM": 0.022,
+    "printedWidthMm": 210.0,
+    "printedHeightMm": 150.0
+  },
+  "files": [
+    "workspace_tag_0_50mm.png",
+    "workspace_tag_1_50mm.png",
+    "workspace_tag_2_50mm.png",
+    "workspace_tag_3_50mm.png",
+    "object_tag_10_30mm.png",
+    "object_tag_11_30mm.png",
+    "object_tag_12_30mm.png",
+    "object_tag_13_30mm.png",
+    "object_tag_14_30mm.png",
+    "object_tag_15_30mm.png",
+    "object_tag_16_30mm.png",
+    "object_tag_17_30mm.png",
+    "object_tag_18_30mm.png",
+    "object_tag_19_30mm.png",
+    "object_tag_20_30mm.png",
+    "object_tag_21_30mm.png",
+    "object_tag_22_30mm.png",
+    "object_tag_23_30mm.png",
+    "object_tag_24_30mm.png",
+    "object_tag_25_30mm.png",
+    "charuco_apriltag_36h11_7x5.png"
+  ]
+}
