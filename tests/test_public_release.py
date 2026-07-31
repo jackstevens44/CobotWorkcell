@@ -8,6 +8,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PublicReleaseTests(unittest.TestCase):
+    def test_root_apache_license_and_notice_are_present(self):
+        license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+        notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("Apache License", license_text)
+        self.assertIn("Version 2.0, January 2004", license_text)
+        self.assertIn("END OF TERMS AND CONDITIONS", license_text)
+        self.assertIn("Copyright 2026 Jack Stevens", notice)
+        self.assertIn("[Apache License 2.0](LICENSE)", readme)
+        self.assertIn("third-party components retain", readme)
+        self.assertNotIn("No root project license", readme)
+
     def test_public_branding_identifies_project_and_supported_robot(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         dashboard = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

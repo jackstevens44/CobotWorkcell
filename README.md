@@ -3,6 +3,7 @@
 > An open-source, camera-aware control and programming platform for the Elephant Robotics myCobot 280 M5.
 
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-D22128.svg)](LICENSE)
 [![Offline CI configured](static/docs/offline-ci-badge.svg)](https://github.com/jackstevens44/CobotWorkcell/actions/workflows/ci.yml)
 [![Robot](https://img.shields.io/badge/Robot-myCobot%20280%20M5-2563EB)](https://www.elephantrobotics.com/en/mycobot-en/)
 [![Control](https://img.shields.io/badge/Control-Local%20first-0F766E)](#privacy)
@@ -1648,9 +1649,9 @@ After publishing:
 
 ### 1. Choose an open-source license
 
-This repository currently does **not** contain a root project license. Until an explicit license is added, other people do not have normal open-source permission to copy, modify, or redistribute the project.
-
-Before making the repository public, choose and add an OSI-approved license. MIT or BSD-3-Clause are common permissive choices; this is a legal/project-governance decision for the owner.
+Complete: CobotWorkcell's original source code and documentation are licensed
+under the [Apache License 2.0](LICENSE). Vendored third-party components retain
+their respective licenses and attribution requirements.
 
 ### 2. Remove secrets
 
@@ -1700,7 +1701,7 @@ The repository includes:
 - [pull-request template](.github/pull_request_template.md)
 - [CODEOWNERS](.github/CODEOWNERS)
 
-The remaining required owner decision is the root `LICENSE`.
+The root [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) are included.
 
 ### 7. Run release checks
 
@@ -1723,7 +1724,7 @@ Also:
 
 ## Contributing
 
-Contributions are welcome after the repository has a project license.
+Contributions are welcome under the project's Apache-2.0 terms.
 
 ### Good contributions
 
@@ -1835,7 +1836,12 @@ Do not rewrite the dashboard or camera registry merely to adopt ROS. Add ROS as 
 
 ### Project license
 
-No root project license has been selected yet. Add one before calling the repository open source.
+CobotWorkcell's original source code and documentation are licensed under the
+[Apache License 2.0](LICENSE). See [`NOTICE`](NOTICE) for project attribution.
+
+Files under `static/vendor/` and any other explicitly attributed third-party
+components retain their original licenses. The root Apache-2.0 license does not
+replace or override those terms.
 
 ### Elephant Robotics assets
 
