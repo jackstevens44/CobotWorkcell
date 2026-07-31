@@ -8,6 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PublicReleaseTests(unittest.TestCase):
+    def test_public_branding_identifies_project_and_supported_robot(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        dashboard = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertTrue(readme.startswith("# CobotWorkcell\n"))
+        self.assertIn("Elephant Robotics myCobot 280 M5", readme)
+        self.assertIn("<h1>CobotWorkcell</h1>", dashboard)
+        self.assertNotIn("AI-Workcell-M5-Cobot-Stack", readme)
+
     def test_tracked_tree_has_no_private_runtime_files(self):
         tracked = subprocess.run(
             ["git", "ls-files"],
