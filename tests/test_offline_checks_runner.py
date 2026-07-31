@@ -10,6 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OfflineChecksRunnerTests(unittest.TestCase):
+    def test_runner_import_resolves_to_repository_scripts_package(self):
+        self.assertEqual(
+            Path(run_offline_checks.__file__).resolve(),
+            ROOT / "scripts" / "run_offline_checks.py",
+        )
+
     def test_runner_installs_declared_dependencies_in_its_virtualenv(self):
         virtualenv_python = Path("/tmp/offline-test-venv/bin/python")
         calls = []
