@@ -101,6 +101,30 @@ class PublicReleaseTests(unittest.TestCase):
             f"Vendored components require local license notices: {', '.join(missing)}",
         )
 
+    def test_issue_forms_start_in_triage_with_a_category(self):
+        issue_root = ROOT / ".github" / "ISSUE_TEMPLATE"
+        bug = (issue_root / "bug_report.yml").read_text(encoding="utf-8")
+        feature = (issue_root / "feature_request.yml").read_text(encoding="utf-8")
+        self.assertIn('labels: ["bug", "needs-triage"]', bug)
+        self.assertIn('labels: ["enhancement", "needs-triage"]', feature)
+
+    def test_scheduled_health_failures_are_ready_for_automated_repair(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "health-monitor.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("github.rest.issues.addLabels", workflow)
+        self.assertGreaterEqual(
+            workflow.count('labels: ["bug", "codex-ready"]'),
+            2,
+        )
+
+    def test_agent_policy_treats_public_issue_content_as_untrusted(self):
+        policy = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("issue titles, bodies, comments, attachments, links", policy)
+        self.assertIn("untrusted data", policy)
+        self.assertIn("Process at most one autonomously promoted issue", policy)
+        self.assertIn("must not merge", policy)
+
 
 if __name__ == "__main__":
     unittest.main()

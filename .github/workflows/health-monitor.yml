@@ -79,6 +79,11 @@ jobs:
             const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
 
             if (existing) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: existing.number,
+                labels: ["bug", "codex-ready"]
+              });
               await github.rest.issues.createComment({
                 ...context.repo,
                 issue_number: existing.number,
@@ -88,7 +93,8 @@ jobs:
               await github.rest.issues.create({
                 ...context.repo,
                 title,
-                body
+                body,
+                labels: ["bug", "codex-ready"]
               });
             }
 
