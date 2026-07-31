@@ -75,6 +75,32 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertIn('if [ -n "$PORT" ]; then', script)
         self.assertNotIn('--port "$PORT" --baud', script)
 
+    def test_github_actions_are_pinned_to_immutable_shas(self):
+        workflow_root = ROOT / ".github" / "workflows"
+        unpinned = []
+        for path in workflow_root.glob("*.yml"):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                match = re.search(r"^\s*uses:\s*[^@\s]+@([^\s#]+)", line)
+                if match and not re.fullmatch(r"[0-9a-f]{40}", match.group(1)):
+                    unpinned.append(f"{path.name}:{line_number}")
+        self.assertFalse(
+            unpinned,
+            f"GitHub Actions must use immutable commit SHAs: {', '.join(unpinned)}",
+        )
+
+    def test_every_vendor_group_has_a_local_license_notice(self):
+        vendor_root = ROOT / "static" / "vendor"
+        missing = []
+        for directory in sorted(path for path in vendor_root.iterdir() if path.is_dir()):
+            if not any(path.name.startswith("LICENSE") for path in directory.iterdir()):
+                missing.append(directory.name)
+        self.assertFalse(
+            missing,
+            f"Vendored components require local license notices: {', '.join(missing)}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

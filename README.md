@@ -1088,7 +1088,7 @@ python3 web_server.py [options]
 | `--port` | none | Robot serial port |
 | `--baud` | `115200` | Robot baud rate |
 | `--timeout` | `0.8` | Serial response timeout in seconds |
-| `--host` | `127.0.0.1` | HTTP bind address |
+| `--host` | `127.0.0.1` | Loopback-only HTTP bind address |
 | `--web-port` | `8765` | HTTP port |
 | `--list` | false | List serial ports and exit |
 
@@ -1108,7 +1108,10 @@ python3 web_server.py \
 python3 web_server.py --list
 ```
 
-Binding to `0.0.0.0` exposes the dashboard to the local network. Do not do this on an untrusted network; the API contains physical-control endpoints and has no user authentication.
+CobotWorkcell refuses non-loopback addresses such as `0.0.0.0` or a LAN IP.
+The API contains physical-control endpoints and does not provide remote
+authentication, so the public release is intentionally accessible only from
+the computer running the server.
 
 ---
 
@@ -1681,13 +1684,12 @@ Before publishing, verify that neither the current tree nor Git history contains
 
 ### 4. Review restart defaults
 
-`restart_server.sh` contains convenience defaults for one developer machine. Public releases should use portable defaults or require environment overrides.
+Complete: `restart_server.sh` now discovers the repository and Python environment portably and accepts environment overrides.
 
 ### 5. Verify third-party assets
 
-- Preserve Elephant Robotics attribution and BSD-3-Clause text for suction CAD.
-- Verify licensing or redistribution permission for robot and adaptive-gripper meshes.
-- Preserve the Three.js license and version information.
+- Elephant Robotics robot, adaptive-gripper, and suction CAD retain local BSD-3-Clause attribution files.
+- The vendored Three.js module retains its MIT license.
 
 ### 6. Review community health files
 
@@ -1797,8 +1799,8 @@ Use GitHub Issues for reproducible bugs and GitHub Discussions for setup questio
 - Part mass is not measured.
 - The adaptive gripper does not provide force feedback through this application.
 - Physical partial execution and Move Here are intentionally unavailable.
-- The HTTP server has no authentication.
-- Network exposure is unsafe by default.
+- The HTTP server has no remote-user authentication and therefore refuses
+  non-loopback network binding.
 - macOS camera discovery has the most specialized support.
 - No ROS 2 backend exists yet.
 
@@ -1845,10 +1847,20 @@ replace or override those terms.
 
 ### Elephant Robotics assets
 
-The suction CAD attribution and BSD-3-Clause license are stored in:
+The robot, adaptive-gripper, and suction CAD assets originate from Elephant
+Robotics' BSD-3-Clause `mycobot_ros` repository. Source attribution and license
+copies are stored alongside each asset group:
 
+- [`static/vendor/mycobot_280_m5/README.md`](static/vendor/mycobot_280_m5/README.md)
+- [`static/vendor/mycobot_280_m5/LICENSE.BSD-3-Clause`](static/vendor/mycobot_280_m5/LICENSE.BSD-3-Clause)
+- [`static/vendor/adaptive_gripper/README.md`](static/vendor/adaptive_gripper/README.md)
+- [`static/vendor/adaptive_gripper/LICENSE.BSD-3-Clause`](static/vendor/adaptive_gripper/LICENSE.BSD-3-Clause)
 - [`static/vendor/suction_gripper/README.md`](static/vendor/suction_gripper/README.md)
 - [`static/vendor/suction_gripper/LICENSE.BSD-3-Clause`](static/vendor/suction_gripper/LICENSE.BSD-3-Clause)
+
+Three.js and its bundled modules retain the MIT license:
+
+- [`static/vendor/three/LICENSE.MIT`](static/vendor/three/LICENSE.MIT)
 
 Review every additional vendor asset before public redistribution.
 

@@ -1,0 +1,14 @@
+Elephant Robotics myCobot 280 M5 assets
+=======================================
+
+The robot meshes, textures, and URDF in this directory originate from
+Elephant Robotics' official `mycobot_ros` repository:
+
+https://github.com/elephantrobotics/mycobot_ros/tree/noetic/mycobot_description/urdf/mycobot_280_m5
+
+The upstream repository is distributed under the BSD 3-Clause license. Its
+license text is preserved in `LICENSE.BSD-3-Clause`.
+
+Elephant Robotics and myCobot are trademarks of their respective owner. Their
+inclusion identifies hardware compatibility and does not imply endorsement of
+CobotWorkcell.

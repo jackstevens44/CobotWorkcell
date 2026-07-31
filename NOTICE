@@ -5,3 +5,8 @@ This product includes third-party software and assets. Those components remain
 under their respective licenses and are not relicensed under Apache-2.0.
 See the "License and third-party assets" section of README.md and the license
 or attribution files stored with vendored components.
+
+- Elephant Robotics myCobot robot, adaptive-gripper, and suction-pump assets:
+  BSD 3-Clause, with notices under `static/vendor/`.
+- Three.js and bundled Three.js modules: MIT, with the notice at
+  `static/vendor/three/LICENSE.MIT`.
