@@ -292,31 +292,73 @@ class TrackStabilizer:
         self.stale_s = stale_s
         self.tracks: Dict[str, Dict[str, Any]] = {}
 
+    @staticmethod
+    def _angle_delta_deg(a: float, b: float) -> float:
+        return ((float(a) - float(b) + 180.0) % 360.0) - 180.0
+
     def update(self, detections: List[Dict[str, Any]], now: Optional[float] = None) -> List[Dict[str, Any]]:
         now = float(now or time.time())
         for detection in detections:
             track_id = str(detection.get("trackId") or detection.get("id") or "")
             if not track_id:
                 continue
-            track = self.tracks.setdefault(track_id, {
-                "points": deque(maxlen=self.window), "updatedAt": now,
-                "angles": deque(maxlen=self.window),
-            })
+            track = self.tracks.get(track_id)
+            if track is None or now - float(track.get("updatedAt") or 0.0) > 1.0:
+                track = {
+                    "points": deque(maxlen=self.window), "updatedAt": now,
+                    "angles": deque(maxlen=self.window),
+                    "heights": deque(maxlen=5),
+                    "committed": None, "committedAngleDeg": None,
+                    "jumpCandidate": None, "jumpCount": 0,
+                }
+                self.tracks[track_id] = track
             observed = (float(detection["position"]["x"]), float(detection["position"]["y"]))
             track["points"].append(observed)
             track["angles"].append(math.radians(float(detection.get("orientationDeg") or 0.0)))
+            track["heights"].append(float(detection["position"].get("z", 0.0)))
             track["updatedAt"] = now
             xs = [p[0] for p in track["points"]]
             ys = [p[1] for p in track["points"]]
             median = (statistics.median(xs), statistics.median(ys))
             detection["trackId"] = track_id
             detection["id"] = track_id
-            detection["observedPosition"] = {"x": median[0], "y": median[1], "z": detection["position"].get("z", 0.0)}
-            detection["committedPosition"] = dict(detection["observedPosition"])
-            detection["position"]["x"], detection["position"]["y"] = median
+            median_z = statistics.median(track["heights"])
+            detection["observedPosition"] = {"x": median[0], "y": median[1], "z": median_z}
+            committed = track.get("committed")
+            if committed is None:
+                committed = median
+            distance = math.hypot(median[0] - committed[0], median[1] - committed[1])
+            observed_distance = math.hypot(observed[0] - committed[0], observed[1] - committed[1])
+            if observed_distance > 0.025:
+                candidate = track.get("jumpCandidate")
+                if candidate and math.hypot(observed[0] - candidate[0], observed[1] - candidate[1]) <= 0.004:
+                    track["jumpCount"] += 1
+                else:
+                    track["jumpCandidate"], track["jumpCount"] = observed, 1
+                next_committed = median if track["jumpCount"] >= 2 else committed
+                if track["jumpCount"] >= 2:
+                    track["jumpCandidate"], track["jumpCount"] = None, 0
+            elif distance <= 0.0015:
+                next_committed = committed
+                track["jumpCandidate"], track["jumpCount"] = None, 0
+            else:
+                next_committed = median
+                track["jumpCandidate"], track["jumpCount"] = None, 0
+            track["committed"] = next_committed
+            detection["committedPosition"] = {"x": next_committed[0], "y": next_committed[1], "z": median_z}
+            detection["position"]["x"], detection["position"]["y"] = next_committed
+            detection["position"]["z"] = median_z
             sin_mean = statistics.mean(math.sin(value) for value in track["angles"])
             cos_mean = statistics.mean(math.cos(value) for value in track["angles"])
-            detection["orientationDeg"] = math.degrees(math.atan2(sin_mean, cos_mean))
+            observed_angle = math.degrees(math.atan2(sin_mean, cos_mean))
+            committed_angle = track.get("committedAngleDeg")
+            if committed_angle is None or abs(self._angle_delta_deg(observed_angle, committed_angle)) > 1.0:
+                committed_angle = observed_angle
+            track["committedAngleDeg"] = committed_angle
+            detection["orientationDeg"] = committed_angle
+            detection["stabilizationProgress"] = {
+                "jumpFrames": int(track.get("jumpCount") or 0), "jumpFramesRequired": 2,
+            }
             detection["stabilitySpreadM"] = max(max(xs) - min(xs), max(ys) - min(ys)) if len(xs) > 1 else 0.0
         for track_id in list(self.tracks):
             if now - float(self.tracks[track_id]["updatedAt"]) > self.stale_s:
@@ -328,6 +370,9 @@ class FiducialLocalizer:
     def __init__(self) -> None:
         self.detector_cache: Dict[str, Any] = {}
         self.stabilizer = TrackStabilizer()
+        self.surface_tracks: Dict[str, Dict[str, Any]] = {}
+        self.last_object_tag_rejections: List[Dict[str, Any]] = []
+        self.last_object_tag_statuses: Dict[int, Dict[str, Any]] = {}
 
     def _detector(self, dictionary_name: str):
         if dictionary_name not in self.detector_cache:
@@ -344,7 +389,8 @@ class FiducialLocalizer:
         return np.asarray(matrix, np.float64), np.asarray(distortion, np.float64)
 
     def localize(self, jpeg: bytes, camera_config: Dict[str, Any], calibration: Dict[str, Any], draw_debug: bool = True,
-                 registered_parts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                 registered_parts: Optional[List[Dict[str, Any]]] = None,
+                 support_surfaces: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         image = decode_jpeg(jpeg)
         height, width = image.shape[:2]
         matrix, distortion = self._intrinsics(calibration)
@@ -376,6 +422,19 @@ class FiducialLocalizer:
         # rejected (most importantly when the camera pose must be re-locked).
         # Invalid frames still contain no detections or robot coordinates.
         def reject(reason: str, quality: Dict[str, Any], homography_value=None) -> Dict[str, Any]:
+            for tag in visible_tags:
+                tag.update({
+                    "localizationStatus": "frame_invalid" if tag.get("bound") else "unbound",
+                    "rejectionReason": reason if tag.get("bound") else None,
+                })
+            quality["objectTagStatuses"] = [
+                {
+                    "tagId": tag["tagId"], "partId": tag.get("partId"),
+                    "localizationStatus": tag["localizationStatus"],
+                    "reason": tag.get("rejectionReason"),
+                }
+                for tag in visible_tags if tag.get("bound")
+            ]
             result = self._invalid(reason, undistorted, quality, corners, ids_flat, draw_debug)
             result["frameSize"] = {"width": width, "height": height}
             result["visibleTags"] = visible_tags
@@ -474,11 +533,25 @@ class FiducialLocalizer:
         pose_ok, rvec, tvec = cv2.solvePnP(object_points_3d, src, matrix, np.zeros(5), flags=cv2.SOLVEPNP_ITERATIVE)
         if not pose_ok:
             return reject("camera_pose_failed", quality)
-        detections = self._tagged_detections(corners, ids_flat, object_tags, matrix, rvec, tvec, quality)
+        detections = self._tagged_detections(
+            corners, ids_flat, object_tags, matrix, rvec, tvec, quality,
+            support_surfaces=support_surfaces,
+        )
+        quality["objectTagRejections"] = deepcopy(self.last_object_tag_rejections)
+        quality["objectTagStatuses"] = deepcopy(list(self.last_object_tag_statuses.values()))
         detections = self.stabilizer.update(detections)
+        detection_by_tag = {int(item.get("tagId")): item for item in detections if item.get("tagId") is not None}
         for tag in visible_tags:
             x, y = apply_homography(normalized, tag["centerPx"])
             tag["robotTablePosition"] = {"x": x, "y": y, "z": 0.0}
+            status = deepcopy(self.last_object_tag_statuses.get(int(tag["tagId"])) or {})
+            if not tag.get("bound"):
+                status = {"localizationStatus": "unbound", "rejectionReason": None}
+            elif int(tag["tagId"]) in detection_by_tag:
+                status.update({"localizationStatus": "localized", "rejectionReason": None})
+            if status.get("reason") and "rejectionReason" not in status:
+                status["rejectionReason"] = status["reason"]
+            tag.update(status)
         overlay = self._draw_overlay(undistorted, corners, ids_flat, detections, quality, None) if draw_debug else None
         return {
             "ok": True, "frame": "robot", "detections": detections, "quality": quality,
@@ -502,25 +575,370 @@ class FiducialLocalizer:
             output.append(camera_center + scale * ray_robot)
         return np.asarray(output, np.float64)
 
-    def _tagged_detections(self, corners, ids, mappings, matrix, rvec, tvec, quality):
+    @staticmethod
+    def _surface_contains(surface: Dict[str, Any], x: float, y: float) -> bool:
+        center = surface.get("center") or {}
+        size = surface.get("size") or {}
+        return (
+            abs(float(x) - float(center.get("x", 0.0))) <= float(size.get("x", 0.0)) / 2.0
+            and abs(float(y) - float(center.get("y", 0.0))) <= float(size.get("y", 0.0)) / 2.0
+        )
+
+    @staticmethod
+    def _surface_edge_gaps(surface: Dict[str, Any], x: float, y: float) -> Tuple[float, float]:
+        center = surface.get("center") or {}
+        size = surface.get("size") or {}
+        return (
+            max(0.0, abs(float(x) - float(center.get("x", 0.0))) - float(size.get("x", 0.0)) / 2.0),
+            max(0.0, abs(float(y) - float(center.get("y", 0.0))) - float(size.get("y", 0.0)) / 2.0),
+        )
+
+    @staticmethod
+    def _tag_pose_candidates(points, expected_size, matrix, robot_rvec, robot_tvec):
+        half = float(expected_size) / 2.0
+        tag_points = np.asarray([
+            [half, half, 0.0], [half, -half, 0.0],
+            [-half, -half, 0.0], [-half, half, 0.0],
+        ], np.float64)
+        pose_ok, tag_rvec, tag_tvec = cv2.solvePnP(
+            tag_points, np.asarray(points, np.float64).reshape(4, 2), matrix,
+            np.zeros(5), flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        if not pose_ok:
+            return []
+        camera_rotation, _ = cv2.Rodrigues(robot_rvec)
+        robot_translation = np.asarray(robot_tvec, np.float64).reshape(3)
+        candidates = []
+        for tag_rvec, tag_tvec in ((tag_rvec, tag_tvec),):
+            tag_rotation, _ = cv2.Rodrigues(tag_rvec)
+            tag_translation = np.asarray(tag_tvec, np.float64).reshape(3)
+            center_robot = camera_rotation.T @ (tag_translation - robot_translation)
+            rotation_robot = camera_rotation.T @ tag_rotation
+            projected, _ = cv2.projectPoints(tag_points, tag_rvec, tag_tvec, matrix, np.zeros(5))
+            errors = np.linalg.norm(projected.reshape(4, 2) - np.asarray(points).reshape(4, 2), axis=1)
+            normal_z = float(rotation_robot[2, 2])
+            candidates.append({
+                "center": center_robot,
+                "rotation": rotation_robot,
+                "rmsPx": float(math.sqrt(float(np.mean(errors * errors)))),
+                "maxPx": float(np.max(errors)),
+                "normalZ": normal_z,
+            })
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item["rmsPx"]
+                + (100.0 if item["center"][2] < -0.02 or item["center"][2] > 0.40 else 0.0)
+                + (50.0 if abs(item["normalZ"]) < math.cos(math.radians(15.0)) else 0.0)
+            ),
+        )
+
+    @classmethod
+    def _horizontal_tag_pose(cls, points, expected_size, matrix, robot_rvec, robot_tvec,
+                             minimum_z: float = -0.02, maximum_z: float = 0.40):
+        """Recover a flat tag's height from its known size without planar PnP tilt ambiguity."""
+        points = np.asarray(points, np.float64).reshape(4, 2)
+        expected_size = float(expected_size)
+
+        def geometry_at(z_value: float):
+            corners = cls._pixels_on_robot_plane(points, matrix, robot_rvec, robot_tvec, z_value)
+            xy = corners[:, :2]
+            edges = np.roll(xy, -1, axis=0) - xy
+            sides = np.linalg.norm(edges, axis=1)
+            diagonals = np.asarray([
+                np.linalg.norm(xy[2] - xy[0]), np.linalg.norm(xy[3] - xy[1]),
+            ])
+            adjacent_cosines = []
+            for index in range(4):
+                a = edges[index]
+                b = edges[(index + 1) % 4]
+                adjacent_cosines.append(abs(float(np.dot(a, b))) / max(1e-12, float(np.linalg.norm(a) * np.linalg.norm(b))))
+            mean_side = float(np.mean(sides))
+            quality = {
+                "meanSideM": mean_side,
+                "sideVariationRatio": float(np.std(sides) / max(mean_side, 1e-9)),
+                "diagonalMismatchRatio": float(abs(diagonals[0] - diagonals[1]) / max(float(np.mean(diagonals)), 1e-9)),
+                "maximumAdjacentCosine": float(max(adjacent_cosines)),
+            }
+            return corners, quality
+
+        camera_rotation, _ = cv2.Rodrigues(robot_rvec)
+        camera_center = (-camera_rotation.T @ np.asarray(robot_tvec, np.float64).reshape(3, 1)).reshape(3)
+        upper = min(float(maximum_z), float(camera_center[2]) - 0.02)
+        lower = float(minimum_z)
+        if upper <= lower:
+            return None, "object_tag_height_unavailable"
+        try:
+            _, low_quality = geometry_at(lower)
+            _, high_quality = geometry_at(upper)
+        except (ValueError, np.linalg.LinAlgError):
+            return None, "object_tag_height_unavailable"
+        low_error = low_quality["meanSideM"] - expected_size
+        high_error = high_quality["meanSideM"] - expected_size
+        if low_error * high_error > 0.0:
+            return None, "object_tag_scale_inconsistent"
+        for _ in range(42):
+            middle = (lower + upper) / 2.0
+            _, middle_quality = geometry_at(middle)
+            middle_error = middle_quality["meanSideM"] - expected_size
+            if low_error * middle_error <= 0.0:
+                upper, high_error = middle, middle_error
+            else:
+                lower, low_error = middle, middle_error
+        measured_z = (lower + upper) / 2.0
+        corners, geometry = geometry_at(measured_z)
+        geometry["measuredTagSizeM"] = geometry["meanSideM"]
+        geometry["expectedTagSizeM"] = expected_size
+        geometry_ok = (
+            geometry["sideVariationRatio"] <= 0.18
+            and geometry["diagonalMismatchRatio"] <= 0.15
+            and geometry["maximumAdjacentCosine"] <= 0.30
+        )
+        if not geometry_ok:
+            return {"z": measured_z, "corners": corners, "geometry": geometry}, "object_tag_geometry_inconsistent"
+        center = corners[:, :2].mean(axis=0)
+        edge = corners[1, :2] - corners[0, :2]
+        yaw = math.degrees(math.atan2(float(edge[1]), float(edge[0]))) + 90.0
+        return {"z": measured_z, "corners": corners, "center": center, "yawDeg": yaw, "geometry": geometry}, None
+
+    def _committed_surface(
+        self, part_id: str, measured_support_z: float, x: float, y: float,
+        surfaces: List[Dict[str, Any]], now: float,
+        surface_positions: Optional[Dict[str, Tuple[float, float]]] = None,
+        footprint_margin: Tuple[float, float] = (0.0, 0.0),
+    ) -> Tuple[Optional[Dict[str, Any]], str, float]:
+        # A 30 mm tag near the edge of a camera frame can move the recovered
+        # support height by a couple of millimetres even when its square
+        # geometry is otherwise valid.  Keep the operator's configured entry
+        # tolerance as the nominal limit, but add a very small measurement
+        # guard band at that boundary.  This is deliberately much smaller
+        # than the separation required to choose between two surfaces, so it
+        # cannot turn an ambiguous Table/Platform observation into a match.
+        entry_measurement_guard_m = 0.0025
+        track = self.surface_tracks.setdefault(part_id, {
+            "heights": deque(maxlen=5), "candidateId": None, "candidateCount": 0,
+            "surfaceId": None, "updatedAt": now,
+        })
+        if now - float(track.get("updatedAt") or 0.0) > 1.0:
+            track["heights"].clear()
+            track["candidateId"] = None
+            track["candidateCount"] = 0
+        track["heights"].append(float(measured_support_z))
+        track["updatedAt"] = now
+        filtered_z = float(statistics.median(track["heights"]))
+        enabled = []
+        footprint_rejections = []
+        overlap_by_surface = {}
+        margin_x = min(0.025, max(0.0, float(footprint_margin[0])))
+        margin_y = min(0.025, max(0.0, float(footprint_margin[1])))
+        for item in surfaces:
+            if not item.get("enabled", True):
+                continue
+            candidate_x, candidate_y = (surface_positions or {}).get(
+                str(item.get("id")), (float(x), float(y))
+            )
+            raw_dx, raw_dy = self._surface_edge_gaps(item, candidate_x, candidate_y)
+            if raw_dx <= margin_x and raw_dy <= margin_y:
+                enabled.append(item)
+                overlap_by_surface[str(item.get("id"))] = {
+                    "edgeOverhangM": max(raw_dx, raw_dy),
+                    "usedObjectFootprintOverlap": bool(raw_dx > 0.0 or raw_dy > 0.0),
+                }
+            else:
+                footprint_rejections.append({
+                    "surfaceId": item.get("id"),
+                    "distanceM": math.hypot(max(0.0, raw_dx - margin_x), max(0.0, raw_dy - margin_y)),
+                    "rawEdgeGapM": max(raw_dx, raw_dy),
+                    "heightResidualM": abs(filtered_z - float(item.get("topZ") or 0.0)),
+                    "candidatePosition": {"x": candidate_x, "y": candidate_y},
+                })
+        matches = []
+        for surface in enabled:
+            tolerance_key = "holdToleranceM" if surface.get("id") == track.get("surfaceId") else "entryToleranceM"
+            tolerance = float(surface.get(tolerance_key) or (0.020 if tolerance_key == "holdToleranceM" else 0.015))
+            effective_tolerance = tolerance + (entry_measurement_guard_m if tolerance_key == "entryToleranceM" else 0.0)
+            residual = abs(filtered_z - float(surface.get("topZ") or 0.0))
+            if residual <= effective_tolerance:
+                matches.append((residual, surface))
+        matches.sort(key=lambda item: item[0])
+        if len(matches) > 1 and matches[1][0] - matches[0][0] >= 0.010:
+            matches = matches[:1]
+        track["surfaceDiagnostics"] = {
+            "candidateCount": len(matches),
+            "nearestSurfaceId": matches[0][1].get("id") if matches else (min(enabled, key=lambda item: abs(filtered_z - float(item.get("topZ") or 0.0))).get("id") if enabled else None),
+            "nearestResidualM": matches[0][0] if matches else (min((abs(filtered_z - float(item.get("topZ") or 0.0)) for item in enabled), default=None)),
+            "stabilizationCount": int(track.get("candidateCount") or 0),
+            "stabilizationRequired": 3,
+            "footprintRejections": sorted(footprint_rejections, key=lambda item: (item["heightResidualM"], item["distanceM"])),
+            "surfaceOverlap": overlap_by_surface,
+            "entryMeasurementGuardM": entry_measurement_guard_m,
+        }
+        if len(matches) != 1:
+            track["candidateId"] = None
+            track["candidateCount"] = 0
+            close_footprint = next((
+                item for item in track["surfaceDiagnostics"]["footprintRejections"]
+                if item["heightResidualM"] <= 0.020
+            ), None)
+            if close_footprint:
+                track["surfaceDiagnostics"]["nearestSurfaceId"] = close_footprint["surfaceId"]
+                track["surfaceDiagnostics"]["nearestResidualM"] = close_footprint["heightResidualM"]
+                track["surfaceDiagnostics"]["footprintDistanceM"] = close_footprint["distanceM"]
+            reason = (
+                "support_surface_ambiguous" if len(matches) > 1
+                else "support_surface_outside_footprint" if close_footprint
+                else "support_surface_unknown"
+            )
+            return None, reason, filtered_z
+        matches.sort(key=lambda item: item[0])
+        selected = matches[0][1]
+        track["surfaceDiagnostics"].update(overlap_by_surface.get(str(selected.get("id"))) or {})
+        if track.get("surfaceId") == selected.get("id"):
+            return selected, "matched", filtered_z
+        if track.get("candidateId") == selected.get("id"):
+            track["candidateCount"] += 1
+        else:
+            track["candidateId"] = selected.get("id")
+            track["candidateCount"] = 1
+        if track["candidateCount"] < 3:
+            track["surfaceDiagnostics"]["stabilizationCount"] = track["candidateCount"]
+            return None, "support_surface_stabilizing", filtered_z
+        track["surfaceId"] = selected.get("id")
+        track["candidateId"] = None
+        track["candidateCount"] = 0
+        return selected, "matched", filtered_z
+
+    def _tagged_detections(
+        self, corners, ids, mappings, matrix, rvec, tvec, quality,
+        support_surfaces: Optional[List[Dict[str, Any]]] = None,
+    ):
         out = []
+        self.last_object_tag_rejections = []
+        self.last_object_tag_statuses = {}
+        now = time.time()
         for marker_corners, marker_id in zip(corners, ids):
             config = mappings.get(marker_id)
             if not config:
                 continue
             points = marker_corners.reshape(4, 2)
             size = {**{"x": 0.04, "y": 0.04, "z": 0.05}, **(config.get("size") or {})}
-            robot_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, float(size["z"]))
-            side_lengths = np.linalg.norm(np.roll(robot_corners[:, :2], -1, axis=0) - robot_corners[:, :2], axis=1)
-            recovered_size = float(np.mean(side_lengths))
             expected_size = float(config.get("tagSizeM") or 0.03)
-            if not 0.65 * expected_size <= recovered_size <= 1.35 * expected_size:
-                continue
-            tag_center = robot_corners[:, :2].mean(axis=0)
-            # Corner 0 -> 1 follows the marker's local -Y edge. Adding 90°
-            # recovers the marker's local +X axis, matching the registry's
-            # definition of yaw zero as aligned to the object's length axis.
-            tag_yaw = math.degrees(math.atan2(robot_corners[1, 1] - robot_corners[0, 1], robot_corners[1, 0] - robot_corners[0, 0])) + 90.0
+            surface_diagnostics = {}
+            # Backward-compatible direct-call path for old fixtures and saved
+            # calibrations. The continuous runtime always supplies surfaces
+            # and therefore uses the true size-derived 3D tag pose below.
+            if support_surfaces is None:
+                robot_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, float(size["z"]))
+                side_lengths = np.linalg.norm(np.roll(robot_corners[:, :2], -1, axis=0) - robot_corners[:, :2], axis=1)
+                recovered_size = float(np.mean(side_lengths))
+                if not 0.65 * expected_size <= recovered_size <= 1.35 * expected_size:
+                    continue
+                tag_center = robot_corners[:, :2].mean(axis=0)
+                tag_yaw = math.degrees(math.atan2(robot_corners[1, 1] - robot_corners[0, 1], robot_corners[1, 0] - robot_corners[0, 0])) + 90.0
+                surface = {"id": "surface-table", "name": "Main Table", "topZ": 0.0}
+                measured_tag_z = float(size["z"])
+                measured_support_z = 0.0
+                pose_rms = 0.0
+                pose_maximum = 0.0
+                tilt_deg = 0.0
+                geometry_quality = None
+            else:
+                maximum_z = max(
+                    [float(item.get("topZ") or 0.0) + float(size["z"]) + 0.08 for item in support_surfaces]
+                    or [0.40]
+                )
+                pose, pose_error = self._horizontal_tag_pose(
+                    points, expected_size, matrix, rvec, tvec,
+                    minimum_z=-0.02, maximum_z=maximum_z,
+                )
+                geometry_quality = deepcopy((pose or {}).get("geometry"))
+                if pose_error:
+                    rejection = {
+                        "tagId": marker_id, "partId": config.get("partId"),
+                        "reason": pose_error, "localizationStatus": "rejected",
+                        "tagGeometryQuality": geometry_quality,
+                    }
+                    self.last_object_tag_rejections.append(rejection)
+                    self.last_object_tag_statuses[marker_id] = deepcopy(rejection)
+                    continue
+                tag_center = pose["center"]
+                measured_tag_z = float(pose["z"])
+                measured_support_z = measured_tag_z - float(size["z"])
+                track_key = str(config.get("partId") or config.get("id") or marker_id)
+                surface_positions = {}
+                footprint_margin = (0.0, 0.0)
+                tag_offset = config.get("tagOffsetM") or config.get("centerOffsetM") or {}
+                for candidate_surface in support_surfaces:
+                    candidate_z = float(candidate_surface.get("topZ") or 0.0) + float(size["z"])
+                    candidate_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, candidate_z)
+                    candidate_center = candidate_corners[:, :2].mean(axis=0)
+                    candidate_edge = candidate_corners[1, :2] - candidate_corners[0, :2]
+                    candidate_tag_yaw = math.degrees(math.atan2(float(candidate_edge[1]), float(candidate_edge[0]))) + 90.0
+                    candidate_yaw = candidate_tag_yaw + float(config.get("yawOffsetDeg") or 0.0)
+                    candidate_radians = math.radians(candidate_yaw)
+                    candidate_ox = float(tag_offset.get("x", 0.0))
+                    candidate_oy = float(tag_offset.get("y", 0.0))
+                    candidate_object_x = float(candidate_center[0]) - math.cos(candidate_radians) * candidate_ox + math.sin(candidate_radians) * candidate_oy
+                    candidate_object_y = float(candidate_center[1]) - math.sin(candidate_radians) * candidate_ox - math.cos(candidate_radians) * candidate_oy
+                    surface_positions[str(candidate_surface.get("id"))] = (
+                        candidate_object_x, candidate_object_y,
+                    )
+                    footprint_margin = (
+                        abs(math.cos(candidate_radians)) * float(size["x"]) / 2.0
+                        + abs(math.sin(candidate_radians)) * float(size["y"]) / 2.0,
+                        abs(math.sin(candidate_radians)) * float(size["x"]) / 2.0
+                        + abs(math.cos(candidate_radians)) * float(size["y"]) / 2.0,
+                    )
+                surface, surface_reason, filtered_support_z = self._committed_surface(
+                    track_key,
+                    measured_support_z, float(tag_center[0]), float(tag_center[1]),
+                    list(support_surfaces), now, surface_positions=surface_positions,
+                    footprint_margin=footprint_margin,
+                )
+                surface_diagnostics = deepcopy(
+                    (self.surface_tracks.get(track_key) or {}).get("surfaceDiagnostics") or {}
+                )
+                if surface is None:
+                    rejection = {
+                        "tagId": marker_id, "partId": config.get("partId"), "reason": surface_reason,
+                        "localizationStatus": "stabilizing" if surface_reason == "support_surface_stabilizing" else "rejected",
+                        "measuredTagTopZ": measured_tag_z, "measuredSupportZ": filtered_support_z,
+                        "nearestSurfaceId": surface_diagnostics.get("nearestSurfaceId"),
+                        "nearestSurfaceResidualM": surface_diagnostics.get("nearestResidualM"),
+                        "surfaceFootprintDistanceM": surface_diagnostics.get("footprintDistanceM"),
+                        "edgeOverhangM": surface_diagnostics.get("edgeOverhangM"),
+                        "measuredTagPosition": {"x": float(tag_center[0]), "y": float(tag_center[1])},
+                        "tagGeometryQuality": geometry_quality,
+                        "stabilizationProgress": {
+                            "frames": surface_diagnostics.get("stabilizationCount", 0),
+                            "required": surface_diagnostics.get("stabilizationRequired", 3),
+                        },
+                    }
+                    self.last_object_tag_rejections.append(rejection)
+                    self.last_object_tag_statuses[marker_id] = deepcopy(rejection)
+                    continue
+                measured_support_z = filtered_support_z
+                tag_yaw = float(pose["yawDeg"])
+                pose_rms = 0.0
+                pose_maximum = 0.0
+                tilt_deg = None
+                canonical_tag_z = float(surface.get("topZ") or 0.0) + float(size["z"])
+                canonical_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, canonical_tag_z)
+                side_lengths = np.linalg.norm(np.roll(canonical_corners[:, :2], -1, axis=0) - canonical_corners[:, :2], axis=1)
+                recovered_size = float(np.mean(side_lengths))
+                if not 0.65 * expected_size <= recovered_size <= 1.35 * expected_size:
+                    rejection = {
+                        "tagId": marker_id, "partId": config.get("partId"),
+                        "reason": "object_tag_size_inconsistent", "localizationStatus": "rejected",
+                        "measuredTagTopZ": measured_tag_z, "measuredSupportZ": measured_support_z,
+                        "nearestSurfaceId": surface.get("id"),
+                        "nearestSurfaceResidualM": abs(measured_support_z - float(surface.get("topZ") or 0.0)),
+                        "tagGeometryQuality": geometry_quality,
+                    }
+                    self.last_object_tag_rejections.append(rejection)
+                    self.last_object_tag_statuses[marker_id] = deepcopy(rejection)
+                    continue
+                tag_center = canonical_corners[:, :2].mean(axis=0)
             yaw = tag_yaw + float(config.get("yawOffsetDeg") or 0.0)
             offset = config.get("tagOffsetM") or config.get("centerOffsetM") or {}
             radians = math.radians(yaw)
@@ -528,9 +946,39 @@ class FiducialLocalizer:
             x = float(tag_center[0]) - math.cos(radians) * ox + math.sin(radians) * oy
             y = float(tag_center[1]) - math.sin(radians) * ox - math.cos(radians) * oy
             detection = self._detection(config.get("partId") or config.get("id") or f"tag-object-{marker_id}", config.get("label") or f"Tagged Object {marker_id}", config.get("type") or config.get("class") or "box", x, y, yaw, size, points, "object_tag", quality, 0.99)
-            detection["position"]["z"] = float(size["z"]) / 2.0
-            detection.update({"tagId": marker_id, "poseQuality": {"recoveredTagSizeM": recovered_size, "expectedTagSizeM": expected_size, "reprojectionRmsPx": quality.get("reprojectionRmsPx")}})
+            detection["position"]["z"] = float(surface.get("topZ") or 0.0) + float(size["z"]) / 2.0
+            detection.update({
+                "tagId": marker_id,
+                "supportSurfaceId": surface.get("id"),
+                "supportSurfaceName": surface.get("name"),
+                "supportSurfaceZ": float(surface.get("topZ") or 0.0),
+                "measuredTagTopZ": measured_tag_z,
+                "measuredSupportZ": measured_support_z,
+                "supportHeightResidualM": measured_support_z - float(surface.get("topZ") or 0.0),
+                "poseQuality": {
+                    "recoveredTagSizeM": recovered_size,
+                    "expectedTagSizeM": expected_size,
+                    "reprojectionRmsPx": pose_rms,
+                    "reprojectionMaxPx": pose_maximum,
+                    "tagTiltDeg": tilt_deg,
+                    "tagGeometryQuality": geometry_quality,
+                    "edgeOverhangM": surface_diagnostics.get("edgeOverhangM", 0.0),
+                    "usedObjectFootprintOverlap": bool(surface_diagnostics.get("usedObjectFootprintOverlap")),
+                    "surfaceConfidence": max(0.0, 1.0 - abs(measured_support_z - float(surface.get("topZ") or 0.0)) / max(0.001, float(surface.get("holdToleranceM") or 0.020))),
+                },
+            })
             out.append(detection)
+            self.last_object_tag_statuses[marker_id] = {
+                "tagId": marker_id, "partId": config.get("partId"),
+                "localizationStatus": "localized", "rejectionReason": None,
+                "measuredTagTopZ": measured_tag_z, "measuredSupportZ": measured_support_z,
+                "nearestSurfaceId": surface.get("id"),
+                "nearestSurfaceResidualM": abs(measured_support_z - float(surface.get("topZ") or 0.0)),
+                "tagGeometryQuality": geometry_quality,
+                "edgeOverhangM": surface_diagnostics.get("edgeOverhangM", 0.0),
+                "usedObjectFootprintOverlap": bool(surface_diagnostics.get("usedObjectFootprintOverlap")),
+                "stabilizationProgress": {"frames": 3, "required": 3},
+            }
         return out
 
     @staticmethod
@@ -556,6 +1004,23 @@ class FiducialLocalizer:
         overlay = image.copy()
         if ids:
             cv2.aruco.drawDetectedMarkers(overlay, corners, np.asarray(ids, np.int32).reshape(-1, 1))
+        object_statuses = {
+            int(item.get("tagId")): item for item in (quality.get("objectTagStatuses") or [])
+            if item.get("tagId") is not None
+        }
+        for marker_corners, marker_id in zip(corners, ids or []):
+            status = object_statuses.get(int(marker_id))
+            if not status:
+                continue
+            state = status.get("localizationStatus")
+            color = (20, 210, 40) if state == "localized" else ((0, 180, 255) if state == "stabilizing" else (20, 20, 230))
+            polygon = np.asarray(marker_corners, np.int32).reshape(-1, 1, 2)
+            cv2.polylines(overlay, [polygon], True, color, 3, cv2.LINE_AA)
+            anchor = tuple(np.asarray(marker_corners).reshape(-1, 2).min(axis=0).astype(int))
+            label = f"Tag {marker_id}: {state}"
+            if status.get("reason"):
+                label += f" ({status['reason']})"
+            cv2.putText(overlay, label, (anchor[0], max(18, anchor[1] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
         for det in detections:
             box = det["bboxPx"]
             p1, p2 = (int(box["x"]), int(box["y"])), (int(box["x"] + box["width"]), int(box["y"] + box["height"]))
@@ -619,7 +1084,7 @@ class ContinuousLocalizationRuntime:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.0)
         self.thread = None
-        self.scene.ingest_tag_tracks([], timestamp=time.time() + 1.0, valid=False)
+        self.scene.ingest_tag_tracks([], timestamp=time.time(), valid=False, force_remove=True)
         return self.status()
 
     def process_once(self) -> Dict[str, Any]:
@@ -632,12 +1097,35 @@ class ContinuousLocalizationRuntime:
                 result = self.localizer.localize(
                     jpeg, snapshot.get("camera") or {}, snapshot.get("calibration") or {},
                     registered_parts=snapshot.get("registeredParts") or [],
+                    support_surfaces=snapshot.get("supportSurfaces") or [],
                 )
+                observed_part_ids = [
+                    str(item.get("partId")) for item in (result.get("visibleTags") or [])
+                    if item.get("bound") and item.get("partId")
+                ]
+                rejection_by_part = {
+                    str(item.get("partId")): item
+                    for item in ((result.get("quality") or {}).get("objectTagRejections") or [])
+                    if item.get("partId")
+                }
                 if result.get("ok"):
-                    tracks = self.scene.ingest_tag_tracks(result.get("detections") or [], timestamp=time.time(), valid=True)
+                    tracks = self.scene.ingest_tag_tracks(
+                        result.get("detections") or [], timestamp=time.time(), valid=True,
+                        observed_part_ids=observed_part_ids, rejection_by_part=rejection_by_part,
+                    )
                     result["accepted"] = len(tracks.get("parts") or [])
             if not result.get("ok"):
-                self.scene.ingest_tag_tracks([], timestamp=time.time(), valid=False)
+                self.scene.ingest_tag_tracks(
+                    [], timestamp=time.time(), valid=False,
+                    observed_part_ids=[
+                        str(item.get("partId")) for item in (result.get("visibleTags") or [])
+                        if item.get("bound") and item.get("partId")
+                    ],
+                    rejection_by_part={
+                        str(item.get("partId")): item for item in (result.get("visibleTags") or [])
+                        if item.get("bound") and item.get("partId")
+                    },
+                )
         with self.lock:
             self.last_debug_jpeg = result.pop("debugJpeg", None)
             self.last_visible_tags = deepcopy(result.get("visibleTags") or [])
@@ -662,10 +1150,12 @@ class ContinuousLocalizationRuntime:
                 try:
                     self.process_once()
                 except Exception as exc:
+                    self.scene.ingest_tag_tracks([], timestamp=time.time(), valid=False)
                     with self.lock:
                         self.last_result = {"ok": False, "error": str(exc), "detections": []}
             elif config.get("enabled"):
                 error = "passing_intrinsic_calibration_required" if not intrinsic_ok else "locked_camera_pose_required" if not pose_locked else "nine_point_verification_required"
+                self.scene.ingest_tag_tracks([], timestamp=time.time(), valid=False)
                 with self.lock:
                     self.last_result = {"ok": False, "error": error, "detections": []}
             self.stop_event.wait(max(0.05, float(config.get("intervalS") or 0.08)))

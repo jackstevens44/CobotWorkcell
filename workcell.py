@@ -40,6 +40,13 @@ from mycobot_kinematics import (
 
 SCENE_BOUND_M = 0.42
 TABLE_Z = 0.0
+DEFAULT_SURFACE_ENTRY_TOLERANCE_M = 0.015
+DEFAULT_SURFACE_HOLD_TOLERANCE_M = 0.020
+PARAMETERIZED_CYCLE_XY_ENVELOPE_M = 0.015
+PARAMETERIZED_CYCLE_YAW_ENVELOPE_DEG = 10.0
+DEFAULT_TAG_DISPLAY_RETENTION_S = 2.0
+DEFAULT_TAG_POSE_FRESH_S = 1.0
+TAG_TRACKING_POLICY_VERSION = 2
 
 # Usable vertical contact length below the modeled jaw-center TCP.  In a
 # top-down side pinch the finger contact segment spans
@@ -173,11 +180,19 @@ MYCOBOT_280_COORD_LIMITS = [
     {"axis": "rz", "min": -180.0, "max": 180.0, "unit": "deg"},
 ]
 
+# Generated Cartesian paths may sit just outside the firmware manual's
+# conservative rectangular X/Y range while still being reachable at their
+# particular Z and orientation.  This margin only permits those poses to reach
+# the independent host/firmware IK validators; it is not proof of reachability
+# and is deliberately not used for taught points or jogging.
+PLANNED_COORDINATE_IK_MARGIN_MM = 15.0
+
 
 def validate_coordinate_bounds(
     coords: Any,
     state_id: str = "unknown",
     allow_missing_rpy: bool = True,
+    xy_margin_mm: float = 0.0,
 ) -> List[Dict[str, Any]]:
     errors: List[Dict[str, Any]] = []
     if not isinstance(coords, list) or len(coords) != 6:
@@ -187,6 +202,9 @@ def validate_coordinate_bounds(
             "error": "coordsMm must be [x,y,z,rx,ry,rz].",
         }]
     for index, limit in enumerate(MYCOBOT_280_COORD_LIMITS):
+        margin = max(0.0, float(xy_margin_mm)) if index < 2 else 0.0
+        effective_min = float(limit["min"]) - margin
+        effective_max = float(limit["max"]) + margin
         value = coords[index]
         if value is None and allow_missing_rpy and index >= 3:
             continue
@@ -203,19 +221,22 @@ def validate_coordinate_bounds(
                 "error": "non_numeric_coordinate",
             })
             continue
-        if number < float(limit["min"]) or number > float(limit["max"]):
+        if number < effective_min or number > effective_max:
             errors.append({
                 "stateId": state_id,
                 "axis": limit["axis"],
                 "value": round(number, 3),
-                "min": limit["min"],
-                "max": limit["max"],
+                "min": effective_min,
+                "max": effective_max,
+                "nominalMin": limit["min"],
+                "nominalMax": limit["max"],
+                "xyEvaluationMarginMm": margin,
                 "unit": limit["unit"],
                 "error": "coordinate_out_of_bounds",
                 "message": (
                     f"State {state_id} has invalid coord value on {limit['axis']}: "
                     f"{round(number, 3)} {limit['unit']} outside "
-                    f"{limit['min']} ~ {limit['max']} {limit['unit']}."
+                    f"{effective_min:g} ~ {effective_max:g} {limit['unit']}."
                 ),
             })
     return errors
@@ -256,7 +277,9 @@ class Workcell:
         self.registered_bins: Dict[str, Dict[str, Any]] = {}
         self.tag_track_revision = 0
         self.tag_last_seen: Dict[str, float] = {}
+        self.tag_last_observed: Dict[str, float] = {}
         self.bins: Dict[str, Dict[str, Any]] = {}
+        self.support_surfaces: Dict[str, Dict[str, Any]] = {}
         self.taught_points: Dict[str, Dict[str, Any]] = {}
         self.programs: Dict[str, Dict[str, Any]] = {}
         self.calibration: Dict[str, Any] = self._default_calibration()
@@ -267,6 +290,7 @@ class Workcell:
         self.updated_at: Optional[float] = None
         self._counter = 1
         self._load()
+        self._ensure_table_surface_locked()
 
     # ------------------------------------------------------------- storage
 
@@ -311,6 +335,10 @@ class Workcell:
             "localization": {
                 "enabled": False,
                 "intervalS": 0.08,
+                "displayRetentionS": DEFAULT_TAG_DISPLAY_RETENTION_S,
+                "poseFreshS": DEFAULT_TAG_POSE_FRESH_S,
+                "surfaceStableFrames": 3,
+                "trackingPolicyVersion": TAG_TRACKING_POLICY_VERSION,
             },
             "workspaceBounds": {
                 "xMin": -SCENE_BOUND_M,
@@ -440,6 +468,14 @@ class Workcell:
                     "trackingMode": "apriltag", "tagId": definition["tagId"],
                     "trackingState": "not_visible", "poseFresh": False,
                 })
+        self.support_surfaces = {}
+        for item in records("supportSurfaces"):
+            try:
+                surface = self.normalized_support_surface(item, item)
+            except (TypeError, ValueError):
+                continue
+            self.support_surfaces[surface["id"]] = surface
+        self._ensure_table_surface_locked()
         self.taught_points = {}
         for point in records("taughtPoints"):
             coords = point.get("firmwareFlangeCoordsMmDeg")
@@ -517,6 +553,13 @@ class Workcell:
         loaded_localization = loaded_camera.get("localization")
         if not isinstance(loaded_localization, dict):
             loaded_localization = {}
+        # Version 1 shipped a five-second display cache. Migrate only that
+        # historical default; an explicitly versioned operator override is
+        # preserved. The physical pose-freshness window remains one second.
+        if int(loaded_localization.get("trackingPolicyVersion") or 1) < TAG_TRACKING_POLICY_VERSION:
+            if float(loaded_localization.get("displayRetentionS") or 5.0) == 5.0:
+                loaded_localization["displayRetentionS"] = DEFAULT_TAG_DISPLAY_RETENTION_S
+            loaded_localization["trackingPolicyVersion"] = TAG_TRACKING_POLICY_VERSION
         loaded_workspace_bounds = loaded_camera.get("workspaceBounds")
         if not isinstance(loaded_workspace_bounds, dict):
             loaded_workspace_bounds = {}
@@ -595,6 +638,7 @@ class Workcell:
             "parts": [part for part in self.parts.values() if part.get("trackingMode") != "apriltag"],
             "registeredParts": list(self.registered_parts.values()),
             "bins": list(self.bins.values()),
+            "supportSurfaces": list(self.support_surfaces.values()),
             "taughtPoints": list(self.taught_points.values()),
             "programs": list(self.programs.values()),
             "calibration": self.calibration,
@@ -707,6 +751,7 @@ class Workcell:
             self.parts.pop(str(part_id), None)
             self.registered_parts.pop(str(part_id), None)
             self.tag_last_seen.pop(str(part_id), None)
+            self.tag_last_observed.pop(str(part_id), None)
             self._save_locked()
             return self.snapshot_locked()
 
@@ -726,6 +771,8 @@ class Workcell:
                 if old:
                     old.update({"trackingMode": "virtual", "source": "manual"})
                     old.pop("tagId", None)
+                self.tag_last_seen.pop(str(conflict["partId"]), None)
+                self.tag_last_observed.pop(str(conflict["partId"]), None)
             existing_definition = self.registered_parts.get(part_id) or {}
             existing_part = self.parts.get(part_id) or {}
             raw_size = body.get("size") or existing_definition.get("size") or existing_part.get("size") or {}
@@ -753,6 +800,7 @@ class Workcell:
             # A binding is live only after the camera observes the selected tag.
             self.parts.pop(part_id, None)
             self.tag_last_seen.pop(part_id, None)
+            self.tag_last_observed.pop(part_id, None)
             self._save_locked()
             return {**self.snapshot_locked(), "registeredPart": deepcopy(definition)}
 
@@ -773,14 +821,101 @@ class Workcell:
             part["trackingMode"] = "virtual"
             self.parts[str(part_id)] = part
             self.tag_last_seen.pop(str(part_id), None)
+            self.tag_last_observed.pop(str(part_id), None)
             self._save_locked()
             return {**self.snapshot_locked(), "part": part}
 
-    def ingest_tag_tracks(self, detections: List[Dict[str, Any]], timestamp: Optional[float] = None, valid: bool = True) -> Dict[str, Any]:
+    def _tag_tracking_limits(self) -> Tuple[float, float]:
+        localization = (self.camera or {}).get("localization") or {}
+        retention = clamp(
+            localization.get("displayRetentionS", DEFAULT_TAG_DISPLAY_RETENTION_S), 1.0, 30.0
+        )
+        fresh = clamp(
+            localization.get("poseFreshS", DEFAULT_TAG_POSE_FRESH_S), 0.25, 3.0
+        )
+        return float(retention), float(fresh)
+
+    def _tag_pose_is_fresh_locked(self, part: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
+        if not part or part.get("trackingMode") != "apriltag":
+            return bool(part)
+        _, fresh_s = self._tag_tracking_limits()
+        localized_at = float(part.get("lastLocalizedAt") or part.get("lastSeenAt") or 0.0)
+        # Freshness is derived from the last accepted pose. A single outlined
+        # but rejected frame must not latch a recent valid pose stale.
+        return bool(localized_at and float(now or time.time()) - localized_at <= fresh_s)
+
+    def tag_pose_is_fresh(self, part: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
+        with self.lock:
+            return self._tag_pose_is_fresh_locked(part, now)
+
+    def wait_for_tag_pose(self, part_id: str, timeout_s: float = 0.5) -> bool:
+        """Briefly wait for a visible/stabilizing tag to yield an accepted pose."""
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while True:
+            with self.lock:
+                part = self.parts.get(str(part_id))
+                if self._tag_pose_is_fresh_locked(part):
+                    return True
+                retention_s, _ = self._tag_tracking_limits()
+                observed_at = float((part or {}).get("lastObservedAt") or 0.0)
+                tracking_state = str((part or {}).get("trackingState") or "")
+                may_recover = bool(
+                    observed_at
+                    and time.time() - observed_at <= retention_s
+                    and tracking_state in {
+                        "degraded_recent", "stabilizing", "observed_unlocalized",
+                    }
+                )
+            if not may_recover or time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def tag_pose_unavailable_error(self, part_id: str) -> str:
+        with self.lock:
+            definition = self.registered_parts.get(str(part_id)) or {}
+            part = self.parts.get(str(part_id)) or {}
+            label = str(definition.get("label") or part.get("label") or part_id)
+            tag_id = definition.get("tagId", part.get("tagId"))
+            prefix = f"Tag {tag_id}" if tag_id is not None else label
+            rejection = part.get("localizationRejection") or {}
+            reason = str(rejection.get("reason") or "")
+            progress = rejection.get("stabilizationProgress") or {}
+            if reason == "support_surface_stabilizing":
+                frames = int(progress.get("frames") or 0)
+                required = int(progress.get("required") or 3)
+                return (
+                    f"{prefix} was detected, but its support-surface pose is "
+                    f"stabilizing ({frames}/{required} frames)."
+                )
+            residual = rejection.get("nearestSurfaceResidualM")
+            if reason and residual is not None:
+                return (
+                    f"{prefix} is visible but localization was rejected ({reason}); "
+                    f"nearest surface-height residual is {float(residual) * 1000.0:.1f} mm."
+                )
+            if reason:
+                return f"{prefix} is visible but localization was rejected: {reason}."
+            localized_at = float(part.get("lastLocalizedAt") or part.get("lastSeenAt") or 0.0)
+            if localized_at:
+                return (
+                    f"{prefix} has not produced a valid pose for "
+                    f"{max(0.0, time.time() - localized_at):.1f} seconds."
+                )
+            return f"{label} is registered, but {prefix} has not produced a valid pose."
+
+    def ingest_tag_tracks(
+        self, detections: List[Dict[str, Any]], timestamp: Optional[float] = None,
+        valid: bool = True, observed_part_ids: Optional[List[str]] = None,
+        rejection_by_part: Optional[Dict[str, Dict[str, Any]]] = None,
+        force_remove: bool = False,
+    ) -> Dict[str, Any]:
         """Update live tagged objects without persisting per-frame camera state."""
         now = float(timestamp or time.time())
         by_id = {str(item.get("id") or ""): item for item in detections if item.get("localizationSource") == "object_tag"}
+        observed_ids = {str(value) for value in (observed_part_ids or []) if value}
+        rejections = rejection_by_part or {}
         with self.lock:
+            retention_s, fresh_s = self._tag_tracking_limits()
             pose_changed = False
             membership_changed = False
             for part_id, definition in self.registered_parts.items():
@@ -795,20 +930,77 @@ class Workcell:
                         "pickupProfiles": definition.get("pickupProfiles"),
                     }, self.parts.get(part_id))
                     part.update({
-                        "trackingMode": "apriltag", "tagId": definition["tagId"], "lastSeenAt": now,
+                        "trackingMode": "apriltag", "tagId": definition["tagId"],
+                        "lastSeenAt": now, "lastObservedAt": now, "lastLocalizedAt": now,
+                        "poseFresh": True, "trackingState": "tracked",
                         "poseQuality": detection.get("poseQuality") or detection.get("calibrationQuality"),
                         "localizationSource": "object_tag", "bboxPx": detection.get("bboxPx"), "stale": False,
                         "reservedByPlan": (self.parts.get(part_id) or {}).get("reservedByPlan"),
                         "reservationCreatedAt": (self.parts.get(part_id) or {}).get("reservationCreatedAt"),
+                        "supportSurfaceId": detection.get("supportSurfaceId"),
+                        "supportSurfaceName": detection.get("supportSurfaceName"),
+                        "supportSurfaceZ": detection.get("supportSurfaceZ"),
+                        "measuredTagTopZ": detection.get("measuredTagTopZ"),
+                        "measuredSupportZ": detection.get("measuredSupportZ"),
+                        "supportHeightResidualM": detection.get("supportHeightResidualM"),
                     })
                     self.parts[part_id] = part
                     self.tag_last_seen[part_id] = now
+                    self.tag_last_observed[part_id] = now
                     definition["lastSeenAt"] = now
+                    definition["lastObservedAt"] = now
                     pose_changed = True
                     membership_changed = membership_changed or not was_visible
                 elif part_id in self.parts and self.parts[part_id].get("trackingMode") == "apriltag":
-                    if now - float(self.tag_last_seen.get(part_id) or 0.0) >= 1.0:
+                    part = self.parts[part_id]
+                    if part_id in observed_ids:
+                        self.tag_last_observed[part_id] = now
+                        definition["lastObservedAt"] = now
+                        part["lastObservedAt"] = now
+                        rejection = deepcopy(rejections.get(part_id) or {})
+                        localized_at = float(
+                            self.tag_last_seen.get(part_id)
+                            or part.get("lastLocalizedAt")
+                            or part.get("lastSeenAt")
+                            or 0.0
+                        )
+                        recent_pose = bool(localized_at and now - localized_at <= fresh_s)
+                        next_state = "degraded_recent" if recent_pose else (
+                            "stabilizing" if rejection.get("reason") == "support_surface_stabilizing"
+                            else "observed_unlocalized"
+                        )
+                        if part.get("trackingState") != next_state or part.get("localizationRejection") != rejection:
+                            part["trackingState"] = next_state
+                            part["poseFresh"] = recent_pose
+                            part["localizationRejection"] = rejection
+                            pose_changed = True
+                    else:
+                        observed_at = float(
+                            self.tag_last_observed.get(part_id)
+                            or part.get("lastObservedAt")
+                            or self.tag_last_seen.get(part_id)
+                            or 0.0
+                        )
+                        localized_at = float(
+                            self.tag_last_seen.get(part_id)
+                            or part.get("lastLocalizedAt")
+                            or part.get("lastSeenAt")
+                            or 0.0
+                        )
+                        if now - localized_at >= fresh_s and part.get("trackingState") != "temporarily_lost":
+                            part["trackingState"] = "temporarily_lost"
+                            part["poseFresh"] = False
+                            pose_changed = True
+                    observed_at = float(
+                        self.tag_last_observed.get(part_id)
+                        or part.get("lastObservedAt")
+                        or self.tag_last_seen.get(part_id)
+                        or 0.0
+                    )
+                    if force_remove or (part_id not in observed_ids and now - observed_at >= retention_s):
                         del self.parts[part_id]
+                        self.tag_last_seen.pop(part_id, None)
+                        self.tag_last_observed.pop(part_id, None)
                         pose_changed = True
                         membership_changed = True
             if pose_changed:
@@ -821,7 +1013,13 @@ class Workcell:
             return self.tag_tracks_locked()
 
     def tag_tracks_locked(self) -> Dict[str, Any]:
-        visible = [deepcopy(part) for part in self.parts.values() if part.get("trackingMode") == "apriltag"]
+        visible = [
+            self._part_with_camera_status(deepcopy(part))
+            for part in self.parts.values() if part.get("trackingMode") == "apriltag"
+        ]
+        for part in visible:
+            if not part.get("poseFresh") and part.get("trackingState") == "tracked":
+                part["trackingState"] = "temporarily_lost"
         visible_ids = {part["id"] for part in visible}
         return {
             "ok": True, "revision": self.tag_track_revision, "timestamp": time.time(),
@@ -836,6 +1034,107 @@ class Workcell:
                     "parts": [], "removedIds": [], "unchanged": True,
                 }
             return self.tag_tracks_locked()
+
+    # ------------------------------------------------------ support surfaces
+
+    def _ensure_table_surface_locked(self) -> None:
+        bounds = (self.camera or self._default_camera()).get("workspaceBounds") or {}
+        existing = self.support_surfaces.get("surface-table") or {}
+        self.support_surfaces["surface-table"] = {
+            "id": "surface-table",
+            "kind": "support_surface",
+            "name": str(existing.get("name") or "Main Table"),
+            "center": {
+                "x": (float(bounds.get("xMin", -SCENE_BOUND_M)) + float(bounds.get("xMax", SCENE_BOUND_M))) / 2.0,
+                "y": (float(bounds.get("yMin", -SCENE_BOUND_M)) + float(bounds.get("yMax", SCENE_BOUND_M))) / 2.0,
+            },
+            "size": {
+                "x": float(bounds.get("xMax", SCENE_BOUND_M)) - float(bounds.get("xMin", -SCENE_BOUND_M)),
+                "y": float(bounds.get("yMax", SCENE_BOUND_M)) - float(bounds.get("yMin", -SCENE_BOUND_M)),
+            },
+            "topZ": TABLE_Z,
+            "entryToleranceM": DEFAULT_SURFACE_ENTRY_TOLERANCE_M,
+            "holdToleranceM": DEFAULT_SURFACE_HOLD_TOLERANCE_M,
+            "enabled": True,
+            "locked": True,
+            "color": str(existing.get("color") or "#d7e2ec"),
+            "updatedAt": existing.get("updatedAt"),
+        }
+
+    def normalized_support_surface(
+        self, body: Dict[str, Any], existing: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        base = dict(existing or {})
+        surface_id = str(body.get("id") or base.get("id") or self._next_id("surface"))
+        if surface_id == "surface-table":
+            self._ensure_table_surface_locked()
+            return deepcopy(self.support_surfaces["surface-table"])
+        center = body.get("center") or base.get("center") or {}
+        size = body.get("size") or base.get("size") or {}
+        return {
+            "id": surface_id,
+            "kind": "support_surface",
+            "name": str(body.get("name") or base.get("name") or surface_id),
+            "center": {
+                "x": clamp(center.get("x", 0.18), -SCENE_BOUND_M, SCENE_BOUND_M),
+                "y": clamp(center.get("y", 0.0), -SCENE_BOUND_M, SCENE_BOUND_M),
+            },
+            "size": {
+                "x": clamp(size.get("x", 0.20), 0.03, SCENE_BOUND_M * 2.0),
+                "y": clamp(size.get("y", 0.20), 0.03, SCENE_BOUND_M * 2.0),
+            },
+            "topZ": clamp(body.get("topZ", base.get("topZ", 0.05)), 0.0, 0.30),
+            "entryToleranceM": clamp(
+                body.get("entryToleranceM", base.get("entryToleranceM", DEFAULT_SURFACE_ENTRY_TOLERANCE_M)),
+                # Older workcells could save a 5–10 mm entry band.  That is
+                # narrower than the accuracy of monocular height recovery
+                # from a 30 mm tag and caused clearly visible platform parts
+                # to disappear.  Normalize those legacy values to the
+                # documented 15 mm minimum without rewriting the live file.
+                DEFAULT_SURFACE_ENTRY_TOLERANCE_M, 0.05,
+            ),
+            "holdToleranceM": clamp(
+                body.get("holdToleranceM", base.get("holdToleranceM", DEFAULT_SURFACE_HOLD_TOLERANCE_M)),
+                0.005, 0.06,
+            ),
+            "enabled": bool(body.get("enabled", base.get("enabled", True))),
+            "locked": False,
+            "color": str(body.get("color") or base.get("color") or "#8aa4bd"),
+            "updatedAt": time.time(),
+        }
+
+    def upsert_support_surface(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            surface_id = str(body.get("id") or "")
+            if surface_id == "surface-table":
+                return {"ok": False, "error": "The main table is derived from workspace bounds and cannot be edited here."}
+            surface = self.normalized_support_surface(body, self.support_surfaces.get(surface_id))
+            self.support_surfaces[surface["id"]] = surface
+            self.invalidate_compiled_cycles_locked("support_surface_changed")
+            self._save_locked()
+            return {**self.snapshot_locked(), "supportSurface": deepcopy(surface)}
+
+    def delete_support_surface(self, surface_id: str) -> Dict[str, Any]:
+        with self.lock:
+            surface_id = str(surface_id)
+            if surface_id == "surface-table":
+                return {"ok": False, "error": "The main table cannot be deleted."}
+            if surface_id not in self.support_surfaces:
+                return {"ok": False, "error": f"Support surface '{surface_id}' was not found."}
+            self.support_surfaces.pop(surface_id)
+            self.invalidate_compiled_cycles_locked("support_surface_deleted")
+            self._save_locked()
+            return {**self.snapshot_locked(), "deletedSupportSurfaceId": surface_id}
+
+    def support_surface_revision(self) -> str:
+        with self.lock:
+            payload = [
+                self.support_surfaces[key]
+                for key in sorted(self.support_surfaces)
+            ]
+            return hashlib.sha256(
+                json.dumps(_json_safe(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:16]
 
     # ---------------------------------------------------------------- bins
 
@@ -935,12 +1234,14 @@ class Workcell:
             existing = self.bins.get(str(body.get("id") or ""))
             bin_obj = self.normalized_bin(body, existing)
             self.bins[bin_obj["id"]] = bin_obj
+            self.invalidate_compiled_cycles_locked("bin_changed")
             self._save_locked()
             return {**self.snapshot_locked(), "bin": self._bin_with_geometry(bin_obj)}
 
     def delete_bin(self, bin_id: str) -> Dict[str, Any]:
         with self.lock:
             self.bins.pop(str(bin_id), None)
+            self.invalidate_compiled_cycles_locked("bin_deleted")
             self._save_locked()
             return self.snapshot_locked()
 
@@ -953,6 +1254,7 @@ class Workcell:
             bin_obj["positionSource"] = "operator_confirmation"
             bin_obj["positionVerifiedAt"] = time.time()
             bin_obj["updatedAt"] = time.time()
+            self.invalidate_compiled_cycles_locked("bin_position_confirmed")
             self._save_locked()
             return {**self.snapshot_locked(), "bin": self._bin_with_geometry(bin_obj)}
 
@@ -1453,6 +1755,8 @@ class Workcell:
             entities = []
             occupancy = []
             for part in self.parts.values():
+                if part.get("trackingMode") == "apriltag" and not self._tag_pose_is_fresh_locked(part):
+                    continue
                 entities.append({
                     "kind": "part", "id": part["id"], "label": part.get("label"),
                     "position": deepcopy(part.get("position")), "size": deepcopy(part.get("size")),
@@ -1501,10 +1805,12 @@ class Workcell:
                     })
             registered_inventory = []
             for definition in self.registered_parts.values():
-                visible = definition["partId"] in self.parts
+                live = self.parts.get(definition["partId"])
+                visible = self._tag_pose_is_fresh_locked(live)
                 registered_inventory.append({
                     "partId": definition["partId"], "tagId": definition.get("tagId"),
                     "label": definition.get("label"), "visible": visible,
+                    "trackingState": (live or {}).get("trackingState") or "not_visible",
                 })
                 if not visible:
                     availability_warnings.append({
@@ -1544,11 +1850,18 @@ class Workcell:
         registered = []
         for definition in self.registered_parts.values():
             item = deepcopy(definition)
-            visible = item["partId"] in self.parts and self.parts[item["partId"]].get("trackingMode") == "apriltag"
+            live = self.parts.get(item["partId"])
+            display_visible = bool(live and live.get("trackingMode") == "apriltag")
+            visible = self._tag_pose_is_fresh_locked(live)
             item["visible"] = visible
+            item["displayVisible"] = display_visible
+            item["trackingState"] = (live or {}).get("trackingState") or "not_visible"
+            item["poseFresh"] = visible
+            item["lastObservedAt"] = (live or {}).get("lastObservedAt") or item.get("lastObservedAt")
+            item["lastLocalizedAt"] = (live or {}).get("lastLocalizedAt")
             if visible:
-                item["position"] = deepcopy(self.parts[item["partId"]]["position"])
-                item["orientationDeg"] = self.parts[item["partId"]].get("orientationDeg", 0.0)
+                item["position"] = deepcopy(live["position"])
+                item["orientationDeg"] = live.get("orientationDeg", 0.0)
             else:
                 item.pop("position", None)
                 item.pop("orientationDeg", None)
@@ -1562,6 +1875,8 @@ class Workcell:
             "registeredParts": registered,
             "tagTrackRevision": self.tag_track_revision,
             "bins": [self._bin_with_geometry(b) for b in self.bins.values()],
+            "supportSurfaces": deepcopy(list(self.support_surfaces.values())),
+            "supportSurfaceRevision": self.support_surface_revision(),
             "taughtPoints": deepcopy(list(self.taught_points.values())),
             "workspaceRegions": self.workspace_regions_locked(),
             "programs": list(self.programs.values()),
@@ -1580,11 +1895,23 @@ class Workcell:
     def _part_with_camera_status(self, part: Dict[str, Any]) -> Dict[str, Any]:
         item = dict(part)
         if item.get("source") == "camera":
-            detected_at = float(item.get("detectedAt") or item.get("updatedAt") or 0.0)
-            stale_after = float(self.camera.get("staleAfterS") or 3.0)
-            item["stale"] = bool(detected_at and time.time() - detected_at > stale_after)
-            item["ageS"] = round(max(0.0, time.time() - detected_at), 2) if detected_at else None
+            localized_at = float(item.get("lastLocalizedAt") or item.get("lastSeenAt") or 0.0)
+            item["poseFresh"] = self._tag_pose_is_fresh_locked(item)
+            item["stale"] = not item["poseFresh"]
+            item["ageS"] = round(max(0.0, time.time() - localized_at), 2) if localized_at else None
         return item
+
+    def assistant_snapshot(self) -> Dict[str, Any]:
+        """Return scene data without exposing retained stale tag coordinates."""
+        with self.lock:
+            result = self.snapshot_locked()
+            safe_parts = [
+                part for part in result.get("parts", [])
+                if part.get("trackingMode") != "apriltag" or part.get("poseFresh")
+            ]
+            result["parts"] = safe_parts
+            result["objects"] = deepcopy(safe_parts)
+            return result
 
     def clear_parts(self) -> Dict[str, Any]:
         with self.lock:
@@ -1594,7 +1921,10 @@ class Workcell:
 
     def set_end_effector(self, body: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
-            self.end_effector = self._normalize_end_effector(body.get("endEffector") or body.get("id"))
+            next_tool = self._normalize_end_effector(body.get("endEffector") or body.get("id"))
+            if next_tool != self.end_effector:
+                self.invalidate_compiled_cycles_locked("active_tool_changed")
+            self.end_effector = next_tool
             self._save_locked()
             return self.snapshot_locked()
 
@@ -1680,6 +2010,7 @@ class Workcell:
             config.pop("toolVerticalLiftM", None)
             config["toolOffsetsM"] = deepcopy(TOOL_TCP_OFFSETS_M)
             self.coordinate_planner = config
+            self.invalidate_compiled_cycles_locked("tool_or_planner_calibration_changed")
             self._save_locked()
             return {"ok": True, "coordinatePlanner": self.coordinate_planner, **self.snapshot_locked()}
 
@@ -1705,6 +2036,172 @@ class Workcell:
             return ranked[0] if score(ranked[0]) > 0 else parts[0]
 
     # ------------------------------------------------------------ programs
+
+    @staticmethod
+    def _normalized_run_policy(body: Dict[str, Any]) -> Dict[str, Any]:
+        supplied = body.get("runPolicy") if isinstance(body.get("runPolicy"), dict) else {}
+        mode = str(supplied.get("mode") or "finite").lower()
+        if mode not in ("finite", "continuous", "object_triggered", "external_triggered"):
+            mode = "finite"
+        finite_count = int(clamp(
+            supplied.get("cycleCount", body.get("repeatCount", 1)), 1, 20
+        ))
+        raw_maximum = supplied.get("maxCycles")
+        maximum = None if raw_maximum in (None, "", 0, "0") else int(clamp(raw_maximum, 1, 1_000_000))
+        return {
+            "mode": mode,
+            "cycleCount": finite_count,
+            "maxCycles": maximum,
+            "triggerPartId": str(supplied.get("triggerPartId") or "") or None,
+            "stableFrames": int(clamp(supplied.get("stableFrames", 3), 1, 10)),
+            "rearmAbsentMs": int(clamp(supplied.get("rearmAbsentMs", 1000), 250, 10000)),
+            "cooldownMs": int(clamp(supplied.get("cooldownMs", 500), 0, 10000)),
+            "xyEnvelopeM": clamp(
+                supplied.get("xyEnvelopeM", PARAMETERIZED_CYCLE_XY_ENVELOPE_M), 0.001, 0.05
+            ),
+            "yawEnvelopeDeg": clamp(
+                supplied.get("yawEnvelopeDeg", PARAMETERIZED_CYCLE_YAW_ENVELOPE_DEG), 1.0, 45.0
+            ),
+            "expectedSurfaceId": str(supplied.get("expectedSurfaceId") or "") or None,
+        }
+
+    def program_fingerprint(self, program: Dict[str, Any]) -> str:
+        definition = {
+            "id": program.get("id"),
+            "name": program.get("name"),
+            "editorVersion": program.get("editorVersion", 2),
+            "steps": program.get("steps") or [],
+            "runPolicy": program.get("runPolicy") or self._normalized_run_policy(program),
+        }
+        return hashlib.sha256(
+            json.dumps(_json_safe(definition), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:20]
+
+    def calibration_fingerprint(self) -> str:
+        with self.lock:
+            calibration = self.calibration or {}
+            payload = {
+                "intrinsics": calibration.get("intrinsics"),
+                "fiducials": calibration.get("fiducials"),
+                "verification": calibration.get("verification"),
+            }
+            return hashlib.sha256(
+                json.dumps(_json_safe(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:20]
+
+    def invalidate_compiled_cycles_locked(self, reason: str) -> None:
+        for program in self.programs.values():
+            compiled = program.get("compiledCycle")
+            if isinstance(compiled, dict):
+                compiled["status"] = "stale"
+                compiled["staleReason"] = str(reason)
+                compiled["staleAt"] = time.time()
+
+    @staticmethod
+    def plan_physical_readiness_error(plan: Dict[str, Any]) -> Optional[str]:
+        if plan.get("requiresCapturedToolRpy"):
+            return "Capture the active tool orientation, then validate the program again."
+        unverified = plan.get("unverifiedDestinations") or []
+        if unverified:
+            destination = unverified[0]
+            label = destination.get("label") or destination.get("id") or "destination"
+            return (
+                f"{label} is simulation-only. Move the real destination to the displayed "
+                "position, confirm its physical position, and validate again."
+            )
+        coordinate_errors = (plan.get("coordinatePreflight") or {}).get("errors") or []
+        if coordinate_errors:
+            first = coordinate_errors[0]
+            return first.get("message") or first.get("error") or "Coordinate preflight failed."
+        if plan.get("physicalReady") is False:
+            return (
+                (plan.get("coordinatePreview") or {}).get("error")
+                or plan.get("error")
+                or "The validated path is not authorized for physical execution."
+            )
+        return None
+
+    def persist_compiled_cycle(
+        self, program_id: str, plan: Dict[str, Any], start_angles: List[float]
+    ) -> Dict[str, Any]:
+        with self.lock:
+            program = self.programs.get(str(program_id))
+            preview = plan.get("coordinatePreview") or {}
+            if program is None:
+                return {"ok": False, "error": f"Program '{program_id}' was not found."}
+            if (
+                not plan.get("ok") or not preview.get("ok")
+                or (plan.get("coordinatePreflight") or {}).get("ok") is False
+            ):
+                return {"ok": False, "error": "Only a complete validated program preview can be cached."}
+            physical_ready = bool(plan.get("physicalReady", True))
+            readiness_error = self.plan_physical_readiness_error(plan)
+            snapshots = []
+            for snapshot in plan.get("objectSnapshots") or []:
+                snapshots.append({
+                    "objectId": snapshot.get("objectId"),
+                    "position": deepcopy(snapshot.get("position")),
+                    "size": deepcopy(snapshot.get("size")),
+                    "orientationDeg": snapshot.get("orientationDeg"),
+                    "supportSurfaceId": snapshot.get("supportSurfaceId"),
+                    "supportSurfaceZ": snapshot.get("supportSurfaceZ"),
+                })
+            template = {
+                "ok": True,
+                "mode": plan.get("mode"),
+                "program": plan.get("program"),
+                "steps": deepcopy(plan.get("steps") or []),
+                "physicalReady": physical_ready,
+                "requiresCapturedToolRpy": bool(plan.get("requiresCapturedToolRpy")),
+                "coordinatePreview": deepcopy(preview),
+                "coordinatePreflight": deepcopy(plan.get("coordinatePreflight") or {}),
+                "unverifiedDestinations": deepcopy(plan.get("unverifiedDestinations") or []),
+                "motionModel": deepcopy(plan.get("motionModel") or {}),
+                "destinationSnapshots": deepcopy(plan.get("destinationSnapshots") or []),
+                "objectSnapshots": snapshots,
+                "safetyGate": deepcopy(plan.get("safetyGate") or {}),
+                "durationMs": plan.get("durationMs"),
+            }
+            compiled = {
+                "schemaVersion": 1,
+                "status": "cached" if physical_ready else "validated",
+                "physicalReady": physical_ready,
+                "readinessError": readiness_error,
+                "generatedAt": time.time(),
+                "plannerVersion": "raised-surface-cycle-v1",
+                "programFingerprint": self.program_fingerprint(program),
+                "activeTool": self.end_effector,
+                "toolCalibrationFingerprint": self.tool_calibration_fingerprint(),
+                "cameraCalibrationFingerprint": self.calibration_fingerprint(),
+                "supportSurfaceRevision": self.support_surface_revision(),
+                "startAnglesDeg": [round(float(value), 6) for value in start_angles],
+                "triggerAnchor": deepcopy(snapshots[0]) if snapshots else None,
+                "planTemplate": template,
+            }
+            program["compiledCycle"] = compiled
+            self._save_locked()
+            return {"ok": True, "program": deepcopy(program), "compiledCycle": deepcopy(compiled)}
+
+    def compiled_cycle_error(self, program: Dict[str, Any]) -> Optional[str]:
+        compiled = program.get("compiledCycle")
+        if not isinstance(compiled, dict):
+            return "Program has not been validated and cached."
+        if compiled.get("status") == "stale":
+            return f"Cached cycle is stale: {compiled.get('staleReason') or 'dependency changed'}."
+        checks = (
+            (compiled.get("programFingerprint"), self.program_fingerprint(program), "program changed"),
+            (compiled.get("activeTool"), self.end_effector, "active tool changed"),
+            (compiled.get("toolCalibrationFingerprint"), self.tool_calibration_fingerprint(), "tool calibration changed"),
+            (compiled.get("cameraCalibrationFingerprint"), self.calibration_fingerprint(), "camera calibration changed"),
+            (compiled.get("supportSurfaceRevision"), self.support_surface_revision(), "support surface changed"),
+        )
+        for cached, current, reason in checks:
+            if cached != current:
+                return f"Cached cycle is stale: {reason}."
+        readiness_error = self.plan_physical_readiness_error(compiled.get("planTemplate") or {})
+        if readiness_error:
+            return readiness_error
+        return None
 
     def normalized_program(self, body: Dict[str, Any]) -> Dict[str, Any]:
         program_id = str(body.get("id") or self._next_id("prog"))
@@ -1767,18 +2264,27 @@ class Workcell:
                 })
             elif step_type == "home":
                 steps.append({**common, "type": "home"})
-        return {
+        run_policy = self._normalized_run_policy(body)
+        program = {
             "id": program_id,
             "name": str(body.get("name") or program_id),
             "editorVersion": 2,
-            "repeatCount": int(clamp(body.get("repeatCount", 1), 1, 20)),
+            "repeatCount": run_policy["cycleCount"],
+            "runPolicy": run_policy,
             "steps": steps,
-            "updatedAt": time.time(),
+            "updatedAt": body.get("updatedAt") or time.time(),
         }
+        if isinstance(body.get("compiledCycle"), dict):
+            program["compiledCycle"] = deepcopy(body["compiledCycle"])
+        return program
 
     def save_program(self, body: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
             program = self.normalized_program(body)
+            program["updatedAt"] = time.time()
+            # Editing a program definition always requires a new successful
+            # Validate & Simulate pass before production execution.
+            program.pop("compiledCycle", None)
             error = self._validate_program_locked(program)
             if error:
                 return {"ok": False, "error": error}
@@ -1799,6 +2305,7 @@ class Workcell:
                     "name": program["name"],
                     "steps": legacy_steps,
                     "updatedAt": program["updatedAt"],
+                    "runPolicy": deepcopy(program["runPolicy"]),
                 }
             else:
                 stored_program = program
@@ -1816,6 +2323,13 @@ class Workcell:
             return {**self.snapshot_locked(), "ok": True, "deletedProgramId": normalized_id}
 
     def _validate_program_locked(self, program: Dict[str, Any]) -> Optional[str]:
+        policy = program.get("runPolicy") or self._normalized_run_policy(program)
+        if policy.get("mode") == "object_triggered":
+            trigger_part_id = str(policy.get("triggerPartId") or "")
+            if not trigger_part_id:
+                return "Object-triggered mode requires a registered trigger part."
+            if trigger_part_id not in self.registered_parts:
+                return f"Trigger part '{trigger_part_id}' is not registered."
         holding: Optional[str] = None
         enabled_steps = [step for step in program["steps"] if step.get("enabled", True)]
         if not enabled_steps:
@@ -1863,10 +2377,16 @@ class Workcell:
                 "height",
                 "jpegQuality",
                 "staleAfterS",
-                "localization",
             ):
                 if key in body:
                     camera[key] = body[key]
+            if isinstance(body.get("localization"), dict):
+                localization_defaults = self._default_camera()["localization"]
+                camera["localization"] = {
+                    **localization_defaults,
+                    **(camera.get("localization") or {}),
+                    **body["localization"],
+                }
             bounds = body.get("workspaceBounds")
             if isinstance(bounds, dict):
                 current = dict(camera.get("workspaceBounds") or {})
@@ -1891,6 +2411,9 @@ class Workcell:
                 if activation_error:
                     camera["localization"] = {**localization, "enabled": False}
             self.camera = camera
+            if isinstance(bounds, dict):
+                self._ensure_table_surface_locked()
+                self.invalidate_compiled_cycles_locked("workspace_bounds_changed")
             self._save_locked()
             return {**self.snapshot_locked(), "ok": activation_error is None, "error": activation_error, "camera": self.camera}
 
@@ -1922,8 +2445,16 @@ class Workcell:
                 current = self.parts.get(object_id)
                 if current is None:
                     return f"Planned object '{object_id}' is no longer visible; plan again."
-                if current.get("trackingMode") == "apriltag" and time.time() - float(current.get("lastSeenAt") or 0.0) > 1.0:
+                if current.get("trackingMode") == "apriltag" and not self._tag_pose_is_fresh_locked(current):
                     return f"{current.get('label') or object_id} does not have a fresh AprilTag pose; plan again."
+                planned_surface = snapshot.get("supportSurfaceId")
+                if planned_surface and current.get("supportSurfaceId") != planned_surface:
+                    return (
+                        f"{current.get('label') or object_id} changed support surfaces after planning; "
+                        "plan again."
+                    )
+                if snapshot.get("supportSurfaceRevision") and snapshot.get("supportSurfaceRevision") != self.support_surface_revision():
+                    return "A support surface changed after planning; plan again."
                 planned = snapshot.get("position") or {}
                 position = current.get("position") or {}
                 distance = math.hypot(float(position.get("x", 0.0)) - float(planned.get("x", 0.0)),
@@ -2066,6 +2597,7 @@ class Workcell:
                 "note": "Detections in frame='camera' are transformed with this pose.",
                 "updatedAt": time.time(),
             }
+            self.invalidate_compiled_cycles_locked("camera_calibration_changed")
             self._save_locked()
             return {"ok": True, "calibration": self.calibration}
 
@@ -2074,7 +2606,6 @@ class Workcell:
         executed = result.get("executedSteps") or []
         if not executed:
             return result
-        stale_after = float((self.camera or {}).get("staleAfterS") or 3.0)
         now = time.time()
         with self.lock:
             parts = {pid: dict(part) for pid, part in self.parts.items()}
@@ -2086,8 +2617,7 @@ class Workcell:
             part = parts.get(str(object_id))
             if not part or part.get("source") != "camera":
                 continue
-            detected_at = float(part.get("detectedAt") or part.get("updatedAt") or 0.0)
-            fresh = bool(detected_at and now - detected_at <= stale_after)
+            fresh = self.tag_pose_is_fresh(part, now)
             verification = {
                 "expectedObjectId": object_id,
                 "verified": None,
@@ -2161,18 +2691,19 @@ class Workcell:
                     if registered is not None:
                         return {
                             "ok": False,
-                            "error": (
-                                f"{registered.get('label') or requested_object_id} is registered, but its "
-                                "AprilTag is not currently visible."
-                            ),
+                            "error": self.tag_pose_unavailable_error(requested_object_id),
                         }
                     return {"ok": False, "error": f"Pick target '{instruction.get('objectId')}' not found."}
-                if part.get("trackingMode") == "apriltag" and time.time() - float(part.get("lastSeenAt") or 0.0) > 1.0:
-                    return {"ok": False, "error": f"{part['label']} is registered but its AprilTag is not currently visible."}
+                if part.get("trackingMode") == "apriltag" and not self._tag_pose_is_fresh_locked(part):
+                    return {"ok": False, "error": self.tag_pose_unavailable_error(requested_object_id)}
                 if part["id"] not in object_snapshots:
                     object_snapshots[part["id"]] = {
                         "objectId": part["id"], "label": part["label"],
                         "position": deepcopy(part["position"]), "size": deepcopy(part["size"]),
+                        "orientationDeg": part.get("orientationDeg", 0.0),
+                        "supportSurfaceId": part.get("supportSurfaceId"),
+                        "supportSurfaceZ": part.get("supportSurfaceZ"),
+                        "supportSurfaceRevision": self.support_surface_revision(),
                         "detectedAt": part.get("detectedAt"), "trackId": part.get("trackId"),
                         "lastSeenAt": part.get("lastSeenAt"), "trackingMode": part.get("trackingMode"),
                     }
@@ -2339,6 +2870,11 @@ class Workcell:
                     step.get("coordsMm"),
                     str(step.get("stateId") or step.get("name") or "unknown"),
                     allow_missing_rpy=True,
+                    xy_margin_mm=(
+                        PLANNED_COORDINATE_IK_MARGIN_MM
+                        if isinstance(step.get("targetTcpPoseM"), dict)
+                        else 0.0
+                    ),
                 ))
         if preflight_errors:
             first = preflight_errors[0]
@@ -2582,9 +3118,9 @@ class Workcell:
             0.012,
         )
 
-    def minimum_adaptive_gripper_jaw_z(self) -> float:
-        """Lowest table-safe jaw-center height for the modeled fingers."""
-        return TABLE_Z + ADAPTIVE_GRIPPER_FINGER_CONTACT_LENGTH_M + self._minimum_table_clearance_m()
+    def minimum_adaptive_gripper_jaw_z(self, support_z: float = TABLE_Z) -> float:
+        """Lowest support-safe jaw-center height for the modeled fingers."""
+        return float(support_z) + ADAPTIVE_GRIPPER_FINGER_CONTACT_LENGTH_M + self._minimum_table_clearance_m()
 
     def _grasp_height_model(self, part: Dict[str, Any]) -> Dict[str, float]:
         """Return one explicit vertical-contact model for a top-down pinch.
@@ -2601,10 +3137,11 @@ class Workcell:
         object_height = max(0.0, float(size["z"]))
         object_bottom_z = object_center_z - object_height / 2.0
         object_top_z = object_center_z + object_height / 2.0
+        support_z = float(part.get("supportSurfaceZ", object_bottom_z))
         bias = self._pick_height_bias_m()
         minimum_table_clearance = self._minimum_table_clearance_m()
         unclamped_jaw_z = object_center_z + bias
-        minimum_jaw_z = self.minimum_adaptive_gripper_jaw_z()
+        minimum_jaw_z = self.minimum_adaptive_gripper_jaw_z(support_z)
         jaw_center_z = max(unclamped_jaw_z, minimum_jaw_z)
         fingertip_low_z = jaw_center_z - ADAPTIVE_GRIPPER_FINGER_CONTACT_LENGTH_M
         overlap_low_z = max(object_bottom_z, fingertip_low_z)
@@ -2612,7 +3149,7 @@ class Workcell:
         actual_overlap = max(0.0, overlap_high_z - overlap_low_z)
         desired_overlap = min(
             ADAPTIVE_GRIPPER_FINGER_CONTACT_LENGTH_M,
-            max(0.0, object_top_z - max(object_bottom_z, TABLE_Z + minimum_table_clearance)),
+            max(0.0, object_top_z - max(object_bottom_z, support_z + minimum_table_clearance)),
         )
         return {
             "objectBottomZ": object_bottom_z,
@@ -2624,7 +3161,8 @@ class Workcell:
             "unclampedJawCenterZ": unclamped_jaw_z,
             "jawCenterTargetZ": jaw_center_z,
             "fingertipLowTargetZ": fingertip_low_z,
-            "tableClearanceM": fingertip_low_z - TABLE_Z,
+            "tableClearanceM": fingertip_low_z - support_z,
+            "supportSurfaceZ": support_z,
             "minimumTableClearanceM": minimum_table_clearance,
             "pickHeightBiasM": bias,
         }
@@ -2840,6 +3378,46 @@ class Workcell:
             waypoints.append((x, y, safe_z))
         return waypoints
 
+    def _surface_transfer_clearance_z(
+        self,
+        start_xy: Tuple[float, float],
+        end_xy: Tuple[float, float],
+        carried_depth_below_tcp: float,
+        footprint_margin_m: float = 0.02,
+    ) -> float:
+        """Conservatively clear registered raised surfaces along an XY transfer."""
+        required = 0.0
+        for surface in getattr(self, "support_surfaces", {}).values():
+            if not surface.get("enabled", True):
+                continue
+            # The existing table plane is already handled by pick/place
+            # clearance. Only positive-height obstacles raise a transfer.
+            if float(surface.get("topZ") or 0.0) <= TABLE_Z + 1e-9:
+                continue
+            center = surface.get("center") or {}
+            size = surface.get("size") or {}
+            half_x = float(size.get("x", 0.0)) / 2.0 + footprint_margin_m
+            half_y = float(size.get("y", 0.0)) / 2.0 + footprint_margin_m
+            intersects = False
+            for index in range(21):
+                fraction = index / 20.0
+                x = float(start_xy[0]) + (float(end_xy[0]) - float(start_xy[0])) * fraction
+                y = float(start_xy[1]) + (float(end_xy[1]) - float(start_xy[1])) * fraction
+                if (
+                    abs(x - float(center.get("x", 0.0))) <= half_x
+                    and abs(y - float(center.get("y", 0.0))) <= half_y
+                ):
+                    intersects = True
+                    break
+            if intersects:
+                required = max(
+                    required,
+                    float(surface.get("topZ") or 0.0)
+                    + float(carried_depth_below_tcp)
+                    + TRANSIT_EXTRA_CLEARANCE_M,
+                )
+        return required
+
     def _select_coordinate_grasp(self, part: Dict[str, Any]) -> Dict[str, Any]:
         options = self.surface_grasp_candidates(part)
         if not options:
@@ -2986,7 +3564,11 @@ class Workcell:
             max(float(grasp[2]) + PREGRASP_RISE_M, top_z + PREGRASP_RISE_M),
         )
         grasp_z = float(grasp[2])
-        minimum_jaw_z = self.minimum_adaptive_gripper_jaw_z() if self.end_effector == "adaptive_gripper" else TABLE_Z
+        pickup_support_z = float(part.get("supportSurfaceZ", float(position["z"]) - half_z))
+        minimum_jaw_z = (
+            self.minimum_adaptive_gripper_jaw_z(pickup_support_z)
+            if self.end_effector == "adaptive_gripper" else pickup_support_z
+        )
         if self.end_effector == "adaptive_gripper" and grasp_z <= minimum_jaw_z + 1e-6:
             notes.append(
                 f"{part['label']}: pick height clamped to safe gripper pocket z {minimum_jaw_z:.3f} m."
@@ -3067,7 +3649,6 @@ class Workcell:
         # unreachable and encouraged a sideways wrist solution.
         pick_approach_z = pregrasp[2]
         approach_point = (grasp[0], grasp[1], pick_approach_z)
-        lift_top = approach_point
         place_point = (float(place_xy["x"]), float(place_xy["y"]), release_z)
         if self.end_effector == "suction_gripper":
             # A suction TCP is the top contact point, not the object's center.
@@ -3081,11 +3662,18 @@ class Workcell:
                 wall_top + carried_depth_below_tcp + TRANSIT_EXTRA_CLEARANCE_M,
             )
         else:
+            carried_depth_below_tcp = half_z
             place_approach_z = max(
                 above_place_z,
                 wall_top + half_z + TRANSIT_EXTRA_CLEARANCE_M,
             )
-        above_place = (place_point[0], place_point[1], place_approach_z)
+        registered_surface_clearance_z = self._surface_transfer_clearance_z(
+            (grasp[0], grasp[1]), (place_point[0], place_point[1]), carried_depth_below_tcp,
+            footprint_margin_m=max(float(size["x"]), float(size["y"])) / 2.0,
+        )
+        transfer_z = max(pick_approach_z, place_approach_z, registered_surface_clearance_z)
+        lift_top = (approach_point[0], approach_point[1], transfer_z)
+        above_place = (place_point[0], place_point[1], transfer_z)
         retreat_top = above_place
         placed_position = {"x": place_point[0], "y": place_point[1], "z": resting_z}
 
@@ -3124,6 +3712,9 @@ class Workcell:
             "toolApproachTiltDeg": round(float(tool_axes["approachTiltDeg"]), 4) if tool_axes else None,
             "toolApproachAxis": list(tool_axes["approachAxis"]) if tool_axes else None,
             "jawAxis": list(tool_axes["jawAxis"]) if tool_axes else None,
+            "supportSurfaceId": part.get("supportSurfaceId"),
+            "supportSurfaceZ": pickup_support_z,
+            "registeredSurfaceClearanceZ": registered_surface_clearance_z,
         }
 
         steps: List[Dict[str, Any]] = []

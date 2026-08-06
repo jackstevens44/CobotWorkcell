@@ -3,7 +3,7 @@
 
 import * as THREE from "three";
 import { ColladaLoader } from "/vendor/three/examples/jsm/loaders/ColladaLoader.js";
-import { state, on, emit, setSelection, findPart, findBin, clamp } from "./store.js?v=36";
+import { state, on, emit, setSelection, findPart, findBin, clamp } from "./store.js?v=37";
 import { post } from "./api.js?v=28";
 
 const ASSET_ROOT = "/vendor/mycobot_280_m5";
@@ -57,6 +57,7 @@ let lastPickDiagnosticAt = 0;
 const partGroups = new Map();
 const binGroups = new Map();
 const pointGroups = new Map();
+const surfaceGroups = new Map();
 
 const loader = new ColladaLoader();
 const xAxis = new THREE.Vector3(1, 0, 0);
@@ -452,11 +453,12 @@ function makePartMesh(part) {
   const color = partColor(part);
   const cameraSource = part.source === "camera";
   const stale = Boolean(part.stale);
+  const degraded = part.trackingState === "degraded_recent";
   const u = SCENE_METERS_TO_UNITS;
   const material = new THREE.MeshStandardMaterial({
     color, roughness: 0.62, metalness: 0.05,
-    transparent: cameraSource || stale,
-    opacity: stale ? 0.32 : cameraSource ? 0.86 : 1,
+    transparent: cameraSource,
+    opacity: cameraSource ? 0.86 : 1,
   });
   let mesh;
   if (part.type === "sphere") {
@@ -490,7 +492,16 @@ function makePartMesh(part) {
       size.x * u, size.z * u, size.y * u), material);
   }
   mesh.traverse?.((child) => {
-    if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
+    if (child.isMesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+      if (degraded && child.material?.emissive) {
+        child.material.emissive.set("#f59e0b");
+        child.material.emissiveIntensity = 0.35;
+      } else if (stale && child.material) {
+        child.material.opacity = Math.min(Number(child.material.opacity || 1), 0.5);
+      }
+    }
   });
   if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; }
 
@@ -502,7 +513,7 @@ function makePartMesh(part) {
     new THREE.RingGeometry(0.09, selected ? 0.125 : 0.105, 40),
     new THREE.MeshBasicMaterial({
       color: selected ? "#1d4ed8" : cameraSource ? "#0f766e" : color,
-      transparent: true, opacity: stale ? 0.18 : selected ? 0.8 : cameraSource ? 0.55 : 0.35, side: THREE.DoubleSide,
+      transparent: true, opacity: selected ? 0.8 : cameraSource ? 0.55 : 0.35, side: THREE.DoubleSide,
     })
   );
   ring.rotation.x = -Math.PI / 2;
@@ -597,6 +608,31 @@ function makePointMesh(point) {
   return group;
 }
 
+function makeSupportSurfaceMesh(surface) {
+  const group = new THREE.Group();
+  group.userData = { supportSurfaceId: surface.id };
+  if (surface.id === "surface-table" || surface.enabled === false) return group;
+  const u = SCENE_METERS_TO_UNITS;
+  const height = Math.max(0.002, Number(surface.topZ || 0)) * u;
+  const material = new THREE.MeshStandardMaterial({
+    color: surface.color || "#8aa4bd", roughness: 0.82,
+    transparent: true, opacity: 0.45,
+  });
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(
+    Number(surface.size?.x || 0.2) * u,
+    height,
+    Number(surface.size?.y || 0.2) * u,
+  ), material);
+  mesh.position.y = height / 2;
+  mesh.receiveShadow = true;
+  const center = robotFrameToScene({
+    x: Number(surface.center?.x || 0), y: Number(surface.center?.y || 0), z: 0,
+  });
+  group.position.set(center.x, 0, center.z);
+  group.add(mesh);
+  return group;
+}
+
 function makeCameraOverlay() {
   const group = new THREE.Group();
   const cameraPose = state.calibration?.cameraToRobot;
@@ -641,10 +677,18 @@ export function renderEnvironment() {
   for (const group of partGroups.values()) disposeGroup(group);
   for (const group of binGroups.values()) disposeGroup(group);
   for (const group of pointGroups.values()) disposeGroup(group);
+  for (const group of surfaceGroups.values()) disposeGroup(group);
   environmentGroup.clear();
   partGroups.clear();
   binGroups.clear();
   pointGroups.clear();
+  surfaceGroups.clear();
+
+  for (const surface of state.supportSurfaces || []) {
+    const group = makeSupportSurfaceMesh(surface);
+    surfaceGroups.set(surface.id, group);
+    environmentGroup.add(group);
+  }
 
   const partIds = new Set(state.parts.map((part) => part.id));
   const binIds = new Set(state.bins.map((bin) => bin.id));

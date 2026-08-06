@@ -48,7 +48,13 @@ from mycobot_kinematics import (
     top_down_flange_pose,
     top_down_tcp_rotation,
 )
-from workcell import HOME_ANGLES, PHYSICAL_CONFIRM_TOKEN, Workcell, validate_coordinate_bounds
+from workcell import (
+    HOME_ANGLES,
+    PHYSICAL_CONFIRM_TOKEN,
+    PLANNED_COORDINATE_IK_MARGIN_MM,
+    Workcell,
+    validate_coordinate_bounds,
+)
 from camera_service import CameraService
 from fiducial_localization import (
     CharucoCalibrationSession,
@@ -78,6 +84,15 @@ JOINT_MIN_MOVE_WAIT_S = 0.65
 JOINT_FEEDBACK_POLL_S = 0.12
 JOINT_MOVE_TIMEOUT_S = 12.0
 JOINT_FEEDBACK_MISS_TIMEOUT_S = 2.0
+
+
+def generated_coordinate_xy_margin_mm(step: Dict[str, Any]) -> float:
+    """Allow generated poses to reach full IK; taught/jogged poses stay strict."""
+    return (
+        PLANNED_COORDINATE_IK_MARGIN_MM
+        if isinstance(step.get("targetTcpPoseM"), dict)
+        else 0.0
+    )
 MOTION_FEEDBACK_RECOVERY_WINDOW_S = 5.5
 MOTION_FEEDBACK_RECOVERY_DELAY_S = 0.22
 MOTION_COMMAND_FEEDBACK_DELAY_S = 0.12
@@ -203,6 +218,9 @@ class HostKinematicsPreviewRobot:
         self.tool_id = tool_id
         self.correction_local_m = correction_local_m or [0.0, 0.0, 0.0]
         self.suction_contact_distance_m = float(suction_contact_distance_m)
+        # Candidate ranking owns the bounded exhaustive fallback. Individual
+        # offline firmware stand-in calls stay on the fast deterministic seeds.
+        self.exhaustive = False
 
     def solve_inv_kinematics(self, coords: List[float], current: List[float]) -> List[float]:
         flange_position = tuple(float(value) / 1000.0 for value in coords[:3])
@@ -216,6 +234,7 @@ class HostKinematicsPreviewRobot:
         )
         solution = solve_pose(
             model_tcp_position, tcp_rotation, current,
+            exhaustive=self.exhaustive,
             tool_id=self.tool_id,
             correction_local_m=self.correction_local_m,
             suction_contact_distance_m=self.suction_contact_distance_m,
@@ -660,6 +679,14 @@ class RobotService:
             "source": "pymycobot_solve_inv_kinematics" if self.port else "host_offline_kinematics",
             "solvedStates": 0,
             "error": None,
+            "planningDiagnostics": {
+                "orientationCandidates": 0,
+                "fastHostSolves": 0,
+                "exhaustiveHostSolves": 0,
+                "hostCacheHits": 0,
+                "firmwareIkCalls": 0,
+                "exhaustiveFallbackCandidates": 0,
+            },
         }
 
         current = [float(value) for value in (start_angles or [0.0] * 6)[:6]]
@@ -778,6 +805,11 @@ class RobotService:
                             group_steps.append(all_steps[lookahead])
                             lookahead += 1
                         result = self._preview_coordinate_group(robot, group_steps, current)
+                        for key, value in (result.get("planningDiagnostics") or {}).items():
+                            if isinstance(value, (int, float)):
+                                preview["planningDiagnostics"][key] = (
+                                    preview["planningDiagnostics"].get(key, 0) + value
+                                )
                         state_results.extend(result["states"])
                         if not result["ok"]:
                             preview["error"] = result["error"]
@@ -803,6 +835,7 @@ class RobotService:
         except Exception as exc:
             preview["error"] = str(exc)
         plan["coordinatePreview"] = preview
+        plan["planningDiagnostics"] = deepcopy(preview.get("planningDiagnostics") or {})
         plan["physicalReady"] = bool(plan.get("physicalReady", True) and preview["ok"])
         return plan
 
@@ -849,6 +882,7 @@ class RobotService:
         tool_id: str = "adaptive_gripper",
         correction_local_m: Optional[List[float]] = None,
         suction_contact_distance_m: float = 0.072,
+        host_solution_override: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         result = cls._joint_solution_diagnostics(angles, previous)
         if not result.get("angles"):
@@ -889,7 +923,7 @@ class RobotService:
             target_tcp_position[index] - FIRMWARE_BASE_TRANSLATION_M[index]
             for index in range(3)
         )
-        host_solution = solve_pose(
+        host_solution = host_solution_override or solve_pose(
             model_tcp_position, target_tcp_rotation, result["angles"], exhaustive=False,
             tool_id=tool_id, correction_local_m=correction_local_m,
             suction_contact_distance_m=suction_contact_distance_m,
@@ -946,6 +980,7 @@ class RobotService:
         tool_id: str = "adaptive_gripper",
         correction_local_m: Optional[List[float]] = None,
         suction_contact_distance_m: float = 0.072,
+        tilt_candidates: Optional[List[float]] = None,
     ) -> Optional[float]:
         """Estimate the smallest safe radial relocation using host IK only.
 
@@ -963,42 +998,67 @@ class RobotService:
             return None
         unit_x, unit_y = anchor_x / radius, anchor_y / radius
         radial_yaw = math.atan2(anchor_y, anchor_x)
-        maximum_steps = int(INWARD_REACH_SEARCH_MAX_MM / INWARD_REACH_SEARCH_STEP_MM)
-
-        for shift_index in range(1, maximum_steps + 1):
-            shift_mm = shift_index * INWARD_REACH_SEARCH_STEP_MM
+        def solves(shift_mm: float, tilt: float) -> bool:
             shift_m = shift_mm / 1000.0
-            for tilt in IK_ORIENTATION_TILT_OFFSETS_DEG:
-                tcp_rotation = grasp_rotation(desired_jaw_yaw, tilt, radial_yaw)
-                current = list(start_angles)
-                all_valid = True
-                for step in tcp_steps:
-                    target = step["targetTcpPoseM"]
-                    target_tcp = (
-                        float(target["x"]) - unit_x * shift_m,
-                        float(target["y"]) - unit_y * shift_m,
-                        float(target["z"]),
-                    )
-                    model_tcp = tuple(
-                        target_tcp[index] - FIRMWARE_BASE_TRANSLATION_M[index]
-                        for index in range(3)
-                    )
-                    solved = solve_pose(
-                        model_tcp, tcp_rotation, current, exhaustive=False,
-                        tool_id=tool_id, correction_local_m=correction_local_m,
-                        suction_contact_distance_m=suction_contact_distance_m,
-                    )
-                    if solved is None:
-                        all_valid = False
-                        break
-                    continuity = cls._joint_solution_diagnostics(solved, current)
-                    if not continuity.get("ok"):
-                        all_valid = False
-                        break
-                    current = list(solved)
-                if all_valid:
-                    return shift_mm
-        return None
+            tcp_rotation = grasp_rotation(desired_jaw_yaw, tilt, radial_yaw)
+            current = list(start_angles)
+            for step in tcp_steps:
+                target = step["targetTcpPoseM"]
+                target_tcp = (
+                    float(target["x"]) - unit_x * shift_m,
+                    float(target["y"]) - unit_y * shift_m,
+                    float(target["z"]),
+                )
+                model_tcp = tuple(
+                    target_tcp[index] - FIRMWARE_BASE_TRANSLATION_M[index]
+                    for index in range(3)
+                )
+                solved = solve_pose(
+                    model_tcp, tcp_rotation, current, exhaustive=False,
+                    tool_id=tool_id, correction_local_m=correction_local_m,
+                    suction_contact_distance_m=suction_contact_distance_m,
+                )
+                if solved is None or not cls._joint_solution_diagnostics(solved, current).get("ok"):
+                    return False
+                current = list(solved)
+            return True
+
+        # Exponentially bracket the first reachable inward relocation. This is
+        # logarithmic like a max/binary search, but also handles inner
+        # singularities where a pose reachable after 5 mm is not reachable
+        # after moving the full 120 mm inward.
+        low = 0.0
+        high: Optional[float] = None
+        viable_tilt: Optional[float] = None
+        tilt_order = list(dict.fromkeys(
+            float(value) for value in (tilt_candidates or list(IK_ORIENTATION_TILT_OFFSETS_DEG))
+        ))
+        probe = float(INWARD_REACH_SEARCH_STEP_MM)
+        while probe <= INWARD_REACH_SEARCH_MAX_MM:
+            viable_tilt = next(
+                (tilt for tilt in tilt_order if solves(probe, tilt)),
+                None,
+            )
+            if viable_tilt is not None:
+                high = probe
+                break
+            low = probe
+            probe = min(float(INWARD_REACH_SEARCH_MAX_MM), probe * 2.0)
+            if probe == low:
+                break
+        if high is None or viable_tilt is None:
+            return None
+        while high - low > INWARD_REACH_SEARCH_STEP_MM:
+            midpoint = round(
+                ((low + high) / 2.0) / INWARD_REACH_SEARCH_STEP_MM
+            ) * INWARD_REACH_SEARCH_STEP_MM
+            if midpoint <= low or midpoint >= high:
+                break
+            if solves(midpoint, viable_tilt):
+                high = midpoint
+            else:
+                low = midpoint
+        return float(high)
 
     def _preview_fixed_taught_group(
         self, robot: MyCobotDriver, steps: List[Dict[str, Any]], start_angles: List[float]
@@ -1112,7 +1172,12 @@ class RobotService:
         return {"ok": True, "states": states, "endAngles": current, "error": None}
 
     def _preview_coordinate_group(
-        self, robot: MyCobotDriver, steps: List[Dict[str, Any]], start_angles: List[float]
+        self, robot: MyCobotDriver, steps: List[Dict[str, Any]], start_angles: List[float],
+        _orientation_filter: Optional[set] = None,
+        _host_exhaustive: bool = False,
+        _allow_exhaustive_fallback: bool = True,
+        _ik_cache: Optional[Dict[Any, Dict[str, Any]]] = None,
+        _stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if steps and all(step.get("orientationPolicy") == "fixed_taught_pose" for step in steps):
             return self._preview_fixed_taught_group(robot, steps, start_angles)
@@ -1146,6 +1211,15 @@ class RobotService:
         candidates = []
         rejected: List[Dict[str, Any]] = []
         orientation_candidates = []
+        ik_cache = _ik_cache if _ik_cache is not None else {}
+        stats = _stats if _stats is not None else {
+            "orientationCandidates": 0,
+            "fastHostSolves": 0,
+            "exhaustiveHostSolves": 0,
+            "hostCacheHits": 0,
+            "firmwareIkCalls": 0,
+            "exhaustiveFallbackCandidates": 0,
+        }
         yaw_offsets = (
             (0.0,)
             if suction_j6_locked
@@ -1185,6 +1259,59 @@ class RobotService:
                 orientation_candidates.append(
                     (float(tilt), float(yaw_offset), candidate_rpy, tcp_rotation)
                 )
+        preferred_orientation = steps[0].get("preferredOrientation") or {}
+        preferred_key = (
+            float(preferred_orientation.get("tiltOffsetDeg", float("nan"))),
+            float(preferred_orientation.get("yawOffsetDeg", float("nan"))),
+        )
+        orientation_candidates.sort(key=lambda item: (
+            0 if (item[0], item[1]) == preferred_key else 1,
+            abs(item[0]), abs(item[1]),
+        ))
+        if _orientation_filter is not None:
+            orientation_candidates = [
+                item for item in orientation_candidates
+                if (item[0], item[1]) in _orientation_filter
+            ]
+        stats["orientationCandidates"] += len(orientation_candidates)
+
+        def host_solution_for(
+            waypoint: List[float], seed: List[float]
+        ) -> Tuple[Optional[List[float]], Dict[str, Any]]:
+            key = (
+                tuple(round(float(value), 3) for value in waypoint),
+                tuple(round(float(value), 2) for value in seed),
+                tool_id,
+                tuple(round(value, 6) for value in correction_local_m),
+                round(suction_contact_distance_m, 6),
+                bool(_host_exhaustive),
+            )
+            cached = ik_cache.get(key)
+            if cached is not None:
+                stats["hostCacheHits"] += 1
+                return deepcopy(cached.get("angles")), deepcopy(cached)
+            target_flange_position = tuple(float(value) / 1000.0 for value in waypoint[:3])
+            target_flange_rotation = rotation_from_rpy_deg(waypoint[3:6])
+            target_tcp_position, target_tcp_rotation = tcp_from_flange(
+                target_flange_position, target_flange_rotation, tool_id,
+                correction_local_m, suction_contact_distance_m,
+            )
+            model_tcp_position = tuple(
+                target_tcp_position[index] - FIRMWARE_BASE_TRANSLATION_M[index]
+                for index in range(3)
+            )
+            diagnostics: Dict[str, Any] = {}
+            solution = solve_pose(
+                model_tcp_position, target_tcp_rotation, seed,
+                exhaustive=_host_exhaustive, tool_id=tool_id,
+                correction_local_m=correction_local_m,
+                suction_contact_distance_m=suction_contact_distance_m,
+                diagnostics=diagnostics,
+            )
+            stats["exhaustiveHostSolves" if _host_exhaustive else "fastHostSolves"] += 1
+            diagnostics["angles"] = list(solution) if solution is not None else None
+            ik_cache[key] = deepcopy(diagnostics)
+            return solution, diagnostics
         for tilt, yaw, rpy, candidate_tcp_rotation in orientation_candidates:
                 current = list(start_angles)
                 states = []
@@ -1213,10 +1340,24 @@ class RobotService:
                                 ((target_bearing - current_bearing + math.pi) % (2.0 * math.pi)) - math.pi
                             )
                             step_jaw_yaw = float(current_axes["jawYawDeg"]) + bearing_change_deg
+                            step_tcp_rotation = grasp_rotation(
+                                step_jaw_yaw, float(tilt), radial_yaw
+                            )
+                            _, initial_probe_rotation = flange_from_tcp(
+                                requested_tcp_position, step_tcp_rotation, tool_id,
+                                correction_local_m, suction_contact_distance_m,
+                            )
+                            step_rpy = [
+                                float(value) for value in rpy_deg_from_rotation(initial_probe_rotation)
+                            ]
                             # J6 is rotation around the round cup's own axis.
                             # Adjust only the otherwise-free suction yaw until
                             # firmware IK returns the locked starting J6.
-                            for _ in range(4):
+                            # The round suction cup is yaw-symmetric. One
+                            # correction after the initial firmware result is
+                            # sufficient; the final lock tolerance remains the
+                            # authoritative acceptance gate.
+                            for _ in range(2):
                                 step_tcp_rotation = grasp_rotation(step_jaw_yaw, float(tilt), radial_yaw)
                                 probe_flange_position, probe_flange_rotation = flange_from_tcp(
                                     requested_tcp_position, step_tcp_rotation, tool_id,
@@ -1225,7 +1366,18 @@ class RobotService:
                                 probe_rpy = [float(value) for value in rpy_deg_from_rotation(probe_flange_rotation)]
                                 probe_coords = [float(value) * 1000.0 for value in probe_flange_position] + probe_rpy
                                 try:
-                                    probe_angles = robot.solve_inv_kinematics(probe_coords, current)
+                                    # Screen the yaw-correction pose with the
+                                    # independent host model before involving
+                                    # connected firmware. The cache lets the
+                                    # normal waypoint check reuse this solve.
+                                    probe_host, _ = host_solution_for(probe_coords, current)
+                                    if probe_host is None:
+                                        break
+                                    if isinstance(robot, HostKinematicsPreviewRobot):
+                                        probe_angles = list(probe_host)
+                                    else:
+                                        stats["firmwareIkCalls"] += 1
+                                        probe_angles = robot.solve_inv_kinematics(probe_coords, current)
                                     if not isinstance(probe_angles, (list, tuple)) or len(probe_angles) < 6:
                                         break
                                     signed_lock_error = (
@@ -1247,7 +1399,12 @@ class RobotService:
                         coords = [float(value) * 1000.0 for value in candidate_flange_position] + step_rpy
                     else:
                         coords = [float(value) for value in step["coordsMm"][:3]] + step_rpy
-                    bounds = validate_coordinate_bounds(coords, str(step.get("stateId") or "unknown"), allow_missing_rpy=False)
+                    bounds = validate_coordinate_bounds(
+                        coords,
+                        str(step.get("stateId") or "unknown"),
+                        allow_missing_rpy=False,
+                        xy_margin_mm=generated_coordinate_xy_margin_mm(step),
+                    )
                     if bounds:
                         states.append({"stateId": step.get("stateId"), "targetCoords": coords, "rejectionReasons": ["coordinate_bounds"]})
                         break
@@ -1266,11 +1423,50 @@ class RobotService:
                     diagnostics: Dict[str, Any] = {"ok": False, "rejectionReasons": ["no_waypoint_solution"]}
                     try:
                         for waypoint_index, waypoint in enumerate(waypoint_coords, 1):
-                            solved = robot.solve_inv_kinematics(waypoint, current)
+                            host_solution, host_diagnostics = host_solution_for(waypoint, current)
+                            preferred_seed = step.get("preferredJointSeedDeg")
+                            if (
+                                host_solution is None
+                                and isinstance(preferred_seed, list)
+                                and len(preferred_seed) >= 6
+                            ):
+                                host_solution, host_diagnostics = host_solution_for(
+                                    waypoint, [float(value) for value in preferred_seed[:6]]
+                                )
+                            if host_solution is None:
+                                diagnostics = {
+                                    "ok": False,
+                                    "rejectionReasons": [
+                                        "host_ik_unreachable" if _host_exhaustive
+                                        else "host_ik_fast_screen_failed"
+                                    ],
+                                    "hostIkReachable": False,
+                                    "hostBestPositionErrorMm": (
+                                        round(float(host_diagnostics["bestPositionErrorM"]) * 1000.0, 3)
+                                        if host_diagnostics.get("bestPositionErrorM") is not None else None
+                                    ),
+                                    "hostBestOrientationErrorDeg": (
+                                        round(math.degrees(float(host_diagnostics["bestOrientationErrorRad"])), 3)
+                                        if host_diagnostics.get("bestOrientationErrorRad") is not None else None
+                                    ),
+                                    "hostSeedsAttempted": host_diagnostics.get("seedsAttempted"),
+                                }
+                                waypoint_records.append({
+                                    "index": waypoint_index,
+                                    "coords": [round(value, 3) for value in waypoint],
+                                    "ok": False,
+                                })
+                                break
+                            if isinstance(robot, HostKinematicsPreviewRobot):
+                                solved = list(host_solution)
+                            else:
+                                stats["firmwareIkCalls"] += 1
+                                solved = robot.solve_inv_kinematics(waypoint, current)
                             firmware_fk = robot.angles_to_coords(solved) if hasattr(robot, "angles_to_coords") else None
                             diagnostics = self._validate_firmware_ik(
                                 waypoint, solved, current, firmware_fk, tool_id,
                                 correction_local_m, suction_contact_distance_m,
+                                host_solution_override=host_solution,
                             )
                             target_flange_position = tuple(float(value) / 1000.0 for value in waypoint[:3])
                             target_flange_rotation = rotation_from_rpy_deg(waypoint[3:6])
@@ -1353,8 +1549,41 @@ class RobotService:
                     candidates.append((total_error + total_travel * 0.02 + j6_travel * 0.08 + abs(tilt) * 0.1, tilt, yaw, rpy, states, current))
                     break
                 else:
-                    rejected.append({"tiltDeg": tilt, "yawOffsetDeg": yaw, "states": states})
+                    failed_state = next((state for state in states if not state.get("ok")), {})
+                    rejected.append({
+                        "tiltDeg": tilt,
+                        "yawOffsetDeg": yaw,
+                        "states": states,
+                        "residualScore": (
+                            float(failed_state.get("hostBestPositionErrorMm") or 1e6)
+                            + float(failed_state.get("hostBestOrientationErrorDeg") or 1e6)
+                        ),
+                    })
         if not candidates:
+            if not _host_exhaustive and _allow_exhaustive_fallback and rejected:
+                ranked = sorted(
+                    rejected,
+                    key=lambda item: (
+                        -sum(1 for state in item.get("states") or [] if state.get("ok")),
+                        float(item.get("residualScore") or 1e9),
+                        abs(float(item.get("tiltDeg") or 0.0)),
+                    ),
+                )[:2]
+                fallback_filter = {
+                    (float(item["tiltDeg"]), float(item["yawOffsetDeg"]))
+                    for item in ranked
+                }
+                stats["exhaustiveFallbackCandidates"] += len(fallback_filter)
+                return self._preview_coordinate_group(
+                    robot,
+                    steps,
+                    start_angles,
+                    _orientation_filter=fallback_filter,
+                    _host_exhaustive=True,
+                    _allow_exhaustive_fallback=False,
+                    _ik_cache=ik_cache,
+                    _stats=stats,
+                )
             best_rejection = max(rejected, key=lambda item: len(item.get("states") or []), default=None)
             best_states = best_rejection.get("states") if best_rejection else []
             first_failed = next((state for state in best_states if not state.get("ok")), None)
@@ -1362,6 +1591,13 @@ class RobotService:
             inward_shift = self._minimum_inward_shift_mm(
                 steps, start_angles, float(desired_jaw_yaw), tool_id,
                 correction_local_m, suction_contact_distance_m,
+                tilt_candidates=[
+                    float(item.get("tiltDeg") or 0.0)
+                    for item in sorted(
+                        rejected,
+                        key=lambda item: float(item.get("residualScore") or 1e9),
+                    )[:2]
+                ],
             )
             guidance = None
             if "joint_discontinuity" in first_reasons:
@@ -1387,6 +1623,7 @@ class RobotService:
                 "suggestedInwardShiftMm": inward_shift,
                 "correctiveGuidance": guidance,
                 "rejectedCandidates": rejected,
+                "planningDiagnostics": deepcopy(stats),
             }
         _, tilt, yaw, rpy, states, end_angles = min(candidates, key=lambda item: item[0])
         by_id = {state["stateId"]: state for state in states}
@@ -1417,7 +1654,13 @@ class RobotService:
             if suction_j6_locked and locked_j6_deg is not None:
                 step["suctionJ6LockDeg"] = round(locked_j6_deg, 3)
             step["ikValidation"] = {key: value for key, value in state.items() if key not in ("angles", "targetCoords", "stateId", "ok")}
-        return {"ok": True, "states": states, "endAngles": end_angles, "error": None}
+        return {
+            "ok": True,
+            "states": states,
+            "endAngles": end_angles,
+            "error": None,
+            "planningDiagnostics": deepcopy(stats),
+        }
 
     def send_angles(self, angles: Any, speed: Any) -> Dict[str, Any]:
         try:
@@ -2444,7 +2687,12 @@ class RobotService:
                 mode = int(step.get("coordMode") or 0)
                 if mode not in (0, 1):
                     return f"State {state_id} has invalid coordMode {mode}; expected 0 or 1."
-                bounds_errors = validate_coordinate_bounds(coords, str(state_id), allow_missing_rpy=True)
+                bounds_errors = validate_coordinate_bounds(
+                    coords,
+                    str(state_id),
+                    allow_missing_rpy=True,
+                    xy_margin_mm=generated_coordinate_xy_margin_mm(step),
+                )
                 if bounds_errors:
                     return bounds_errors[0].get("message") or f"State {state_id} has invalid coordinate bounds."
                 continue
@@ -2478,7 +2726,12 @@ class RobotService:
             if coords is None:
                 continue
             state_id = str(step.get("stateId") or step.get("name") or "unknown")
-            errors = validate_coordinate_bounds(coords, state_id, allow_missing_rpy=True)
+            errors = validate_coordinate_bounds(
+                coords,
+                state_id,
+                allow_missing_rpy=True,
+                xy_margin_mm=generated_coordinate_xy_margin_mm(step),
+            )
             if errors:
                 first = errors[0]
                 return {
@@ -2808,12 +3061,287 @@ class RobotService:
                 self.abort_event.clear()
 
 
+class ProductionProgramRuntime:
+    """Server-owned, fail-stop runner for validated repeatable programs."""
+
+    def __init__(self, scene: Workcell, service: RobotService) -> None:
+        self.scene = scene
+        self.service = service
+        self.lock = threading.RLock()
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.pending_external_trigger = False
+        self.session: Dict[str, Any] = self._empty_status()
+
+    @staticmethod
+    def _empty_status() -> Dict[str, Any]:
+        return {
+            "ok": True, "state": "disarmed", "programId": None,
+            "programName": None, "mode": None, "cycleCount": 0,
+            "maxCycles": None, "activeCommand": None, "lastError": None,
+            "pendingTrigger": False, "armedAt": None, "updatedAt": time.time(),
+        }
+
+    def status(self) -> Dict[str, Any]:
+        with self.lock:
+            return deepcopy(self.session)
+
+    def _set_state(self, state: str, **updates: Any) -> None:
+        with self.lock:
+            # Stop is authoritative. A worker already between loop checks must
+            # never overwrite the disarmed state with validating/running.
+            if self.stop_event.is_set() and state != "disarmed":
+                return
+            self.session.update({"state": state, "updatedAt": time.time(), **updates})
+
+    def arm(self, program_id: str, confirm: Any, speed_override_pct: Any = 100) -> Dict[str, Any]:
+        if confirm != PHYSICAL_CONFIRM_TOKEN:
+            return {"ok": False, "error": "Explicit physical-run confirmation is required."}
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                return {"ok": False, "error": "A production program is already armed.", **self.session}
+            with self.scene.lock:
+                program = deepcopy(self.scene.programs.get(str(program_id)))
+            if program is None:
+                return {"ok": False, "error": f"Program '{program_id}' was not found."}
+            cache_error = self.scene.compiled_cycle_error(program)
+            if cache_error:
+                return {"ok": False, "error": cache_error}
+            policy = program.get("runPolicy") or self.scene._normalized_run_policy(program)
+            mode = str(policy.get("mode") or "finite")
+            trigger_part_id = str(policy.get("triggerPartId") or "") or None
+            if mode == "object_triggered" and not trigger_part_id:
+                return {"ok": False, "error": "Object-triggered mode requires a registered trigger part."}
+            if trigger_part_id and trigger_part_id not in self.scene.registered_parts:
+                return {"ok": False, "error": "The configured trigger part is no longer registered."}
+            self.stop_event.clear()
+            self.pending_external_trigger = False
+            maximum = policy.get("maxCycles")
+            if mode == "finite":
+                maximum = int(policy.get("cycleCount") or program.get("repeatCount") or 1)
+            self.session = {
+                **self._empty_status(),
+                "state": "armed", "programId": program["id"], "programName": program["name"],
+                "mode": mode, "maxCycles": maximum, "triggerPartId": trigger_part_id,
+                "speedOverridePct": clamp_float(speed_override_pct, 1, 100),
+                "armedAt": time.time(), "updatedAt": time.time(),
+            }
+            self.thread = threading.Thread(
+                target=self._run, args=(program,), name="production-program", daemon=True
+            )
+            self.thread.start()
+            return deepcopy(self.session)
+
+    def trigger(self) -> Dict[str, Any]:
+        with self.lock:
+            if self.session.get("state") in ("disarmed", "completed", "faulted"):
+                return {"ok": False, "error": "No external-triggered program is armed.", **self.session}
+            if self.session.get("mode") != "external_triggered":
+                return {"ok": False, "error": "The armed program is not computer-triggered.", **self.session}
+            # Deliberately one-deep: repeated computer events are coalesced.
+            self.pending_external_trigger = True
+            self.session["pendingTrigger"] = True
+            self.session["updatedAt"] = time.time()
+            return deepcopy(self.session)
+
+    def stop(self) -> Dict[str, Any]:
+        self.stop_event.set()
+        with self.lock:
+            running = self.session.get("state") in ("validating", "running")
+        if running:
+            # The same fail-safe stop path used by the dashboard interrupts
+            # the motion loop; it is never invoked by offline tests unless a
+            # fake service explicitly exercises it.
+            try:
+                self.service.command("stop")
+            except Exception:
+                pass
+        self._set_state("disarmed", pendingTrigger=False, activeCommand=None)
+        return self.status()
+
+    def shutdown(self) -> None:
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+
+    def _object_trigger_ready(
+        self, program: Dict[str, Any], absent_since: Optional[float], stable: int,
+        last_observation: Optional[float],
+    ):
+        policy = program.get("runPolicy") or {}
+        part_id = str(policy.get("triggerPartId") or "")
+        with self.scene.lock:
+            part = deepcopy(self.scene.parts.get(part_id))
+        visible = bool(part and self.scene.tag_pose_is_fresh(part))
+        if not visible:
+            absent_since = absent_since or time.monotonic()
+            return False, absent_since, 0, None
+        if absent_since is not None:
+            rearm_s = float(policy.get("rearmAbsentMs") or 1000) / 1000.0
+            if time.monotonic() - absent_since < rearm_s:
+                return False, absent_since, 0, None
+            absent_since = None
+        expected_surface = policy.get("expectedSurfaceId")
+        if expected_surface and part.get("supportSurfaceId") != expected_surface:
+            return False, absent_since, 0, None
+        observation = float(part.get("lastLocalizedAt") or part.get("lastSeenAt") or 0.0)
+        if observation <= 0.0 or observation == last_observation:
+            return False, absent_since, stable, last_observation
+        stable += 1
+        return (
+            stable >= int(policy.get("stableFrames") or 3),
+            absent_since, stable, observation,
+        )
+
+    def _fresh_cycle_plan(self, program: Dict[str, Any]) -> Dict[str, Any]:
+        with self.scene.lock:
+            current_program = deepcopy(self.scene.programs.get(str(program.get("id") or "")))
+        if current_program is None:
+            return {"ok": False, "error": "The armed program was deleted."}
+        cache_error = self.scene.compiled_cycle_error(current_program)
+        if cache_error:
+            return {"ok": False, "error": cache_error}
+        program = current_program
+        compiled = program.get("compiledCycle") or {}
+        policy = program.get("runPolicy") or {}
+        status = self.service.status()
+        start_angles = [float(value) for value in (status.get("lastAngles") or HOME_ANGLES)]
+        if str(policy.get("mode")) == "object_triggered":
+            anchor = compiled.get("triggerAnchor") or {}
+            part_id = str(policy.get("triggerPartId") or anchor.get("objectId") or "")
+            with self.scene.lock:
+                current = deepcopy(self.scene.parts.get(part_id))
+            if current is None:
+                return {"ok": False, "error": "The trigger part is no longer visible."}
+            if current.get("supportSurfaceId") != anchor.get("supportSurfaceId"):
+                return {"ok": False, "error": "The trigger part changed support surfaces; validate again."}
+            anchor_position = anchor.get("position") or {}
+            current_position = current.get("position") or {}
+            displacement = math.hypot(
+                float(current_position.get("x", 0.0)) - float(anchor_position.get("x", 0.0)),
+                float(current_position.get("y", 0.0)) - float(anchor_position.get("y", 0.0)),
+            )
+            yaw_delta = abs(((float(current.get("orientationDeg") or 0.0) - float(anchor.get("orientationDeg") or 0.0) + 180.0) % 360.0) - 180.0)
+            if displacement > float(policy.get("xyEnvelopeM") or 0.015):
+                return {"ok": False, "error": f"Trigger part moved {displacement * 1000:.1f} mm outside the cached cycle envelope."}
+            if yaw_delta > float(policy.get("yawEnvelopeDeg") or 10.0):
+                return {"ok": False, "error": f"Trigger part yaw changed {yaw_delta:.1f} deg outside the cached cycle envelope."}
+            # Rebuild only the object-relative targets from the saved program;
+            # the operator does not re-plan. Cached state seeds are copied onto
+            # matching steps before the mandatory full preview.
+            plan = self.scene.plan_program(program.get("steps") or [], start_angles, program.get("name") or "production", repeat_count=1)
+            cached_steps = (compiled.get("planTemplate") or {}).get("steps") or []
+            for step, cached_step in zip(plan.get("steps") or [], cached_steps):
+                seed = cached_step.get("previewAngles") or cached_step.get("preferredJointSeedDeg")
+                if seed:
+                    step["preferredJointSeedDeg"] = deepcopy(seed)
+        else:
+            plan = deepcopy((compiled.get("planTemplate") or {}))
+        if not plan.get("ok"):
+            return plan
+        self.service.set_end_effector(self.scene.end_effector)
+        self.service.set_tool_profile(
+            ((self.scene.coordinate_planner or {}).get("toolProfiles") or {}).get(self.scene.end_effector, {})
+        )
+        previewed = self.service.add_coordinate_preview(plan, start_angles)
+        if not previewed.get("ok") or not (previewed.get("coordinatePreview") or {}).get("ok"):
+            self.scene.release_plan_reservations(previewed)
+            return {"ok": False, "error": (previewed.get("coordinatePreview") or {}).get("error") or previewed.get("error") or "Cycle preflight failed."}
+        stale = self.scene.validate_plan_object_snapshots(previewed)
+        if stale:
+            self.scene.release_plan_reservations(previewed)
+            return {"ok": False, "error": stale}
+        return previewed
+
+    def _execute_cycle(self, program: Dict[str, Any]) -> Dict[str, Any]:
+        self._set_state("validating", activeCommand="preflight")
+        plan = self._fresh_cycle_plan(program)
+        if not plan.get("ok"):
+            return plan
+        self._set_state("running", activeCommand=(plan.get("steps") or [{}])[0].get("sourceStepId"))
+        try:
+            execution_plan = DashboardHandler.plan_with_speed_override(
+                plan, self.session.get("speedOverridePct", 100)
+            )
+            result = self.service.execute_pick_plan(execution_plan, PHYSICAL_CONFIRM_TOKEN)
+            result = self.scene.verify_executed_steps(result)
+            self.scene.apply_executed_steps(
+                result.get("executedSteps") or [], physical_run_ok=bool(result.get("ok"))
+            )
+            return result
+        finally:
+            self.scene.release_plan_reservations(plan)
+
+    def _run(self, program: Dict[str, Any]) -> None:
+        policy = program.get("runPolicy") or {}
+        mode = str(policy.get("mode") or "finite")
+        absent_since: Optional[float] = None
+        stable = 0
+        last_observation: Optional[float] = None
+        waiting_for_removal = False
+        try:
+            while not self.stop_event.is_set():
+                maximum = self.session.get("maxCycles")
+                if maximum is not None and int(self.session.get("cycleCount") or 0) >= int(maximum):
+                    self._set_state("completed", activeCommand=None)
+                    return
+                ready = mode in ("finite", "continuous")
+                if mode == "external_triggered":
+                    with self.lock:
+                        ready = self.pending_external_trigger
+                        if ready:
+                            self.pending_external_trigger = False
+                            self.session["pendingTrigger"] = False
+                elif mode == "object_triggered":
+                    if waiting_for_removal:
+                        part_id = str(policy.get("triggerPartId") or "")
+                        with self.scene.lock:
+                            visible = part_id in self.scene.parts
+                        if visible:
+                            self._set_state("waiting", activeCommand=None)
+                            self.stop_event.wait(0.1)
+                            continue
+                        absent_since = absent_since or time.monotonic()
+                        if time.monotonic() - absent_since < float(policy.get("rearmAbsentMs") or 1000) / 1000.0:
+                            self.stop_event.wait(0.1)
+                            continue
+                        waiting_for_removal = False
+                        absent_since = None
+                        stable = 0
+                        last_observation = None
+                    ready, absent_since, stable, last_observation = self._object_trigger_ready(
+                        program, absent_since, stable, last_observation,
+                    )
+                if not ready:
+                    self._set_state("waiting", activeCommand=None)
+                    self.stop_event.wait(0.1)
+                    continue
+                result = self._execute_cycle(program)
+                if not result.get("ok"):
+                    self._set_state("faulted", lastError=result.get("error") or "Cycle failed.", activeCommand=None)
+                    return
+                with self.lock:
+                    self.session["cycleCount"] = int(self.session.get("cycleCount") or 0) + 1
+                    self.session["lastCompletedAt"] = time.time()
+                if mode == "object_triggered":
+                    waiting_for_removal = True
+                cooldown = float(policy.get("cooldownMs") or 500) / 1000.0
+                self._set_state("cooldown", activeCommand=None)
+                self.stop_event.wait(cooldown)
+        except Exception as exc:
+            self._set_state("faulted", lastError=str(exc), activeCommand=None)
+        finally:
+            if self.stop_event.is_set():
+                self._set_state("disarmed", activeCommand=None, pendingTrigger=False)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     service: RobotService
     scene: Workcell
     camera: CameraService
     localization: ContinuousLocalizationRuntime
     charuco: CharucoCalibrationSession
+    production_runtime: ProductionProgramRuntime
     realtime_plans: Dict[str, Dict[str, Any]] = {}
     realtime_pending_runs: Dict[str, Dict[str, Any]] = {}
     realtime_plan_lock = threading.Lock()
@@ -2933,6 +3461,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.write_json(self.scene.tag_tracks(revision))
             return
+        if parsed.path == "/api/program/runtime/status":
+            self.write_json(self.production_runtime.status())
+            return
         if parsed.path == "/api/camera/debug-frame":
             frame = self.localization.get_debug_jpeg()
             if not frame:
@@ -3045,6 +3576,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scene/bin/delete":
             self.write_json(self.scene.delete_bin(str(body.get("id") or "")))
             return
+        if parsed.path == "/api/scene/support-surface":
+            self.write_json(self.scene.upsert_support_surface(body))
+            return
+        if parsed.path == "/api/scene/support-surface/delete":
+            self.write_json(self.scene.delete_support_surface(str(body.get("id") or "")))
+            return
         if parsed.path == "/api/robot/points/capture":
             self.write_json(self.capture_taught_point(body))
             return
@@ -3119,6 +3656,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/program/release-preview":
             self.scene.release_plan_reservations(body.get("plan") or {})
             self.write_json(self.scene.snapshot())
+            return
+        if parsed.path == "/api/program/runtime/arm":
+            self.write_json(self.production_runtime.arm(
+                str(body.get("programId") or ""), body.get("confirm"),
+                body.get("speedOverridePct", 100),
+            ))
+            return
+        if parsed.path == "/api/program/runtime/trigger":
+            self.write_json(self.production_runtime.trigger())
+            return
+        if parsed.path == "/api/program/runtime/stop":
+            self.write_json(self.production_runtime.stop())
             return
         if parsed.path == "/api/pick/simulate":
             self.write_json(self.scene.plan_pick(body, self.service.status()))
@@ -3237,8 +3786,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return None
 
     def plan_program_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        request_started = time.perf_counter()
         steps = body.get("steps")
         name = str(body.get("name") or "ad-hoc")
+        program_id = str(body.get("programId") or "")
+        program: Optional[Dict[str, Any]] = None
         if not steps and body.get("programId"):
             snapshot = self.scene.snapshot()
             program = next(
@@ -3248,26 +3800,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return {"ok": False, "error": f"Program '{body['programId']}' not found."}
             steps = program["steps"]
             name = program["name"]
-            repeat_count = int(program.get("repeatCount") or 1)
+            repeat_count = 1 if body.get("persistCompiledCycle", True) else int(program.get("repeatCount") or 1)
         else:
             repeat_count = int(body.get("repeatCount") or 1)
         if not steps:
             return {"ok": False, "error": "No program steps were provided."}
+        # A camera frame can land between clicking Validate and taking the
+        # scene snapshot. Give an already outlined/stabilizing tag a bounded
+        # half-second opportunity to produce a fresh pose; never wait for an
+        # absent tag or extend physical execution freshness.
+        for step in steps:
+            if step.get("type") == "pick" and step.get("objectId"):
+                self.scene.wait_for_tag_pose(str(step["objectId"]), timeout_s=0.5)
         status = self.service.status()
         start = status.get("lastAngles") or [0.0] * 6
         start_angles = [float(v) for v in start]
+        expansion_started = time.perf_counter()
         plan = self.scene.plan_program(steps, start_angles, name, repeat_count=repeat_count)
+        expansion_ms = (time.perf_counter() - expansion_started) * 1000.0
+        compiled_seeded = False
+        if program is not None and self.scene.compiled_cycle_error(program) is None:
+            cached_steps = {
+                str(step.get("stateId")): step
+                for step in (((program.get("compiledCycle") or {}).get("planTemplate") or {}).get("steps") or [])
+                if step.get("stateId")
+            }
+            for step in plan.get("steps") or []:
+                cached = cached_steps.get(str(step.get("stateId")))
+                if not cached:
+                    continue
+                if cached.get("previewAngles"):
+                    step["preferredJointSeedDeg"] = deepcopy(cached["previewAngles"])
+                    compiled_seeded = True
+                if cached.get("selectedOrientation"):
+                    step["preferredOrientation"] = deepcopy(cached["selectedOrientation"])
+                    compiled_seeded = True
         self.service.set_end_effector(self.scene.end_effector)
         self.service.set_tool_profile(
             ((self.scene.coordinate_planner or {}).get("toolProfiles") or {}).get(
                 self.scene.end_effector, {}
             )
         )
+        preview_started = time.perf_counter()
         previewed = self.service.add_coordinate_preview(plan, start_angles)
+        preview_ms = (time.perf_counter() - preview_started) * 1000.0
+        existing_diagnostics = dict(previewed.get("planningDiagnostics") or {})
+        existing_diagnostics["compiledCycleSeeded"] = compiled_seeded
+        phases = {"programExpansionMs": expansion_ms, "coordinatePreviewMs": preview_ms}
+        slowest_phase = max(phases, key=phases.get)
+        previewed["planningDiagnostics"] = {
+            **existing_diagnostics,
+            **{key: round(value, 1) for key, value in phases.items()},
+            "totalMs": round((time.perf_counter() - request_started) * 1000.0, 1),
+            "slowestPhase": slowest_phase,
+        }
         if not previewed.get("ok") or not previewed.get("coordinatePreview", {}).get("ok"):
             # A failed offline preview is not an executable plan and must not
             # leave its object frozen in a stale reservation.
             self.scene.release_plan_reservations(previewed)
+        elif program_id and body.get("persistCompiledCycle", True):
+            persisted = self.scene.persist_compiled_cycle(program_id, previewed, start_angles)
+            if not persisted.get("ok"):
+                self.scene.release_plan_reservations(previewed)
+                return {**previewed, "ok": False, "error": persisted.get("error")}
+            previewed["compiledCycle"] = persisted.get("compiledCycle")
+            previewed["cacheStatus"] = (persisted.get("compiledCycle") or {}).get("status")
+            previewed["cacheReadinessError"] = (
+                persisted.get("compiledCycle") or {}
+            ).get("readinessError")
         return previewed
 
     def capture_taught_point(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -3837,7 +4437,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if name == "get_environment_scene":
                 return {
                     "ok": True,
-                    "scene": self.scene.snapshot(),
+                    "scene": self.scene.assistant_snapshot(),
                     "spatialContext": self.scene.spatial_context(),
                     "robot": self.service.status(),
                 }
@@ -3856,7 +4456,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 part_id = str(arguments.get("partId") or "")
                 with self.scene.lock:
                     part = deepcopy(self.scene.parts.get(part_id))
-                if not part or part.get("trackingMode") != "apriltag" or time.time() - float(part.get("lastSeenAt") or 0.0) > 1.0:
+                if not part or part.get("trackingMode") != "apriltag" or not self.scene.tag_pose_is_fresh(part):
                     return {"ok": False, "error": "That registered part is not currently visible to the camera."}
                 frame = self.camera.get_jpeg()
                 if not frame:
@@ -4258,6 +4858,9 @@ def main() -> int:
     DashboardHandler.camera = CameraService(DashboardHandler.scene.camera)
     DashboardHandler.charuco = CharucoCalibrationSession()
     DashboardHandler.localization = ContinuousLocalizationRuntime(DashboardHandler.camera, DashboardHandler.scene)
+    DashboardHandler.production_runtime = ProductionProgramRuntime(
+        DashboardHandler.scene, DashboardHandler.service
+    )
     DashboardHandler.service.set_end_effector(DashboardHandler.scene.end_effector)
     DashboardHandler.service.set_tool_profile(
         ((DashboardHandler.scene.coordinate_planner or {}).get("toolProfiles") or {}).get(
@@ -4282,6 +4885,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nStopping dashboard.")
     finally:
+        DashboardHandler.production_runtime.shutdown()
         DashboardHandler.localization.stop()
         DashboardHandler.camera.stop()
         DashboardHandler.service.configure(port=None)

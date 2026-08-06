@@ -1,6 +1,7 @@
 import math
 import random
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -320,6 +321,30 @@ class KinematicsTests(unittest.TestCase):
         self.assertTrue(validate_coordinate_bounds([1, 2], "bad"))
         self.assertTrue(validate_coordinate_bounds([999, 0, 100, 0, 0, 0], "bad"))
         self.assertFalse(validate_coordinate_bounds([100, 0, 100, 180, 0, -180], "ok"))
+
+    def test_generated_coordinate_margin_only_defers_small_xy_overrun_to_ik(self):
+        regression = [290.5, 3.68, 188.0, 180.0, 0.0, -44.88]
+        self.assertTrue(validate_coordinate_bounds(regression, "strict"))
+        self.assertFalse(validate_coordinate_bounds(
+            regression, "generated", xy_margin_mm=15.0
+        ))
+        self.assertTrue(validate_coordinate_bounds(
+            [300.0, 0.0, 188.0, 180.0, 0.0, 0.0],
+            "still_outside",
+            xy_margin_mm=15.0,
+        ))
+
+    def test_plan_validation_uses_margin_only_for_generated_tcp_steps(self):
+        coords = [290.5, 3.68, 188.0, 180.0, 0.0, -44.88]
+        generated = [{
+            "stateId": "generated_pick",
+            "coordsMm": coords,
+            "coordMode": 0,
+            "targetTcpPoseM": {"x": 0.2905, "y": 0.00368, "z": 0.188},
+        }]
+        taught = [{"stateId": "taught_move", "coordsMm": coords, "coordMode": 0}]
+        self.assertIsNone(RobotService.validate_plan_steps(generated))
+        self.assertIn("invalid coord value on x", RobotService.validate_plan_steps(taught))
 
     def test_tcp_to_flange_uses_modeled_adaptive_gripper_transform(self):
         cell = Workcell.__new__(Workcell)
@@ -647,8 +672,10 @@ class PreviewValidationTests(unittest.TestCase):
             def __init__(self):
                 self.last_coords = None
                 self.motion_commands = 0
+                self.ik_calls = 0
 
             def solve_inv_kinematics(self, coords, current):
+                self.ik_calls += 1
                 self.last_coords = list(coords)
                 return [12.52, -60.13, 0.0, -29.86, 0.0, -38.67]
 
@@ -677,6 +704,10 @@ class PreviewValidationTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertEqual(robot.motion_commands, 0)
+        self.assertEqual(
+            robot.ik_calls,
+            result["planningDiagnostics"]["firmwareIkCalls"],
+        )
         self.assertEqual(step["coordsMm"], target)
         self.assertEqual(result["suggestedInwardShiftMm"], 5.0)
         self.assertTrue(any(
@@ -684,6 +715,53 @@ class PreviewValidationTests(unittest.TestCase):
             for candidate in result.get("rejectedCandidates", [])
             for state in candidate.get("states", [])
         ))
+
+    def test_unreachable_raised_suction_target_finishes_bounded_search(self):
+        target_tcp = (0.291, 0.013, 0.228)
+        flange_position, flange_rotation = kin.top_down_flange_pose(
+            target_tcp, 0.0, "suction_gripper", [0.0, 0.0, 0.0], 0.072
+        )
+        rpy = list(kin.rpy_deg_from_rotation(flange_rotation))
+        step = {
+            "stateId": "raised_surface_suction_regression",
+            "coordsMm": [value * 1000.0 for value in flange_position] + rpy,
+            "baseToolRpyDeg": rpy,
+            "targetTcpPoseM": dict(zip(("x", "y", "z"), target_tcp)),
+            "activeTool": "suction_gripper",
+            "toolProfile": {
+                "tcpCorrectionLocalM": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "geometry": {"flangeToContactM": 0.072},
+            },
+            "coordMode": 0,
+        }
+        started = time.perf_counter()
+        result = RobotService(None, 115200, 0.1)._preview_coordinate_group(
+            HostKinematicsPreviewRobot(), [step], [0.0, 0.0, 0.0, 0.0, 0.0, -45.0]
+        )
+        elapsed = time.perf_counter() - started
+        diagnostics = result.get("planningDiagnostics") or {}
+
+        self.assertFalse(result["ok"])
+        self.assertLess(elapsed, 8.0, f"bounded search took {elapsed:.2f}s")
+        self.assertLessEqual(diagnostics.get("exhaustiveFallbackCandidates", 99), 2)
+        self.assertLessEqual(diagnostics.get("exhaustiveHostSolves", 99), 2)
+        self.assertEqual(diagnostics.get("firmwareIkCalls"), 0)
+
+    def test_fast_host_ik_failure_reports_rankable_residuals(self):
+        diagnostics = {}
+        solution = kin.solve_pose(
+            (0.45, 0.0, 0.45),
+            kin.rotation_from_rpy_deg([-180.0, 0.0, 0.0]),
+            [0.0, 0.0, 0.0, 0.0, 0.0, -45.0],
+            exhaustive=False,
+            diagnostics=diagnostics,
+        )
+        self.assertIsNone(solution)
+        self.assertEqual(diagnostics["failurePhase"], "fast")
+        self.assertLessEqual(diagnostics["seedsAttempted"], 12)
+        self.assertIsNotNone(diagnostics["bestAngles"])
+        self.assertIsNotNone(diagnostics["bestPositionErrorM"])
+        self.assertIsNotNone(diagnostics["bestOrientationErrorRad"])
 
     def test_vertical_is_preferred_then_fixed_small_tilt_is_used(self):
         class TiltOnlyRobot:

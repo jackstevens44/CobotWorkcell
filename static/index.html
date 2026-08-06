@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>CobotWorkcell — Elephant Robotics myCobot 280 M5</title>
-    <link rel="stylesheet" href="/styles.css?v=42">
+    <link rel="stylesheet" href="/styles.css?v=43">
   </head>
   <body>
     <div class="workcell">
@@ -38,6 +38,13 @@
               <button id="addBinBtn" type="button" title="Add bin">+</button>
             </div>
             <div id="binList"></div>
+          </div>
+          <div class="tree-section">
+            <div class="tree-header">
+              <span>Surfaces</span>
+              <button id="addSurfaceBtn" type="button" title="Add support surface">+</button>
+            </div>
+            <div id="surfaceList"></div>
           </div>
           <div class="tree-section">
             <div class="tree-header">
@@ -353,7 +360,11 @@
             <input id="progName" type="text" value="Program 1" aria-label="Program name">
           </div>
           <div class="program-header-settings">
-            <label>Repeat <input id="programRepeatCount" type="number" min="1" max="20" value="1"></label>
+            <label>Run mode <select id="programRunMode"><option value="finite">Finite</option><option value="continuous">Until Stop</option><option value="object_triggered">When Part Appears</option><option value="external_triggered">Computer Trigger</option></select></label>
+            <label id="programCycleCountField">Cycles <input id="programRepeatCount" type="number" min="1" max="20" value="1"></label>
+            <label id="programMaxCyclesField">Maximum <input id="programMaxCycles" type="number" min="1" max="1000000" placeholder="Unlimited"></label>
+            <label id="programTriggerPartField">Trigger part <select id="programTriggerPart"></select></label>
+            <label id="programEnvelopeField">Envelope <input id="programXyEnvelope" type="number" min="1" max="50" value="15" title="XY millimeters"> mm / <input id="programYawEnvelope" type="number" min="1" max="45" value="10" title="Yaw degrees">°</label>
             <span id="programDirtyBadge" class="program-badge">Saved</span>
             <button id="saveProgramBtn" type="button">Save</button>
             <button id="deleteProgramBtn" type="button">Delete</button>
@@ -407,10 +418,30 @@
           <div class="program-footer-actions">
             <button id="programStopBtn" type="button" class="danger">STOP</button>
             <button id="planBtn" type="button" class="primary">Validate &amp; Simulate</button>
+            <button id="triggerCycleBtn" type="button" hidden>Trigger Cycle</button>
             <button id="runBtn" type="button" class="danger" disabled>Run Complete Program</button>
           </div>
         </footer>
       </div>
+    </dialog>
+
+    <dialog id="supportSurfaceDialog" class="confirmation-dialog">
+      <form id="supportSurfaceForm" class="confirmation-card">
+        <h2>Support Surface</h2>
+        <input id="supportSurfaceId" type="hidden">
+        <div class="field-row"><label>Name</label><input id="supportSurfaceName" required value="Platform"></div>
+        <div class="field-grid two">
+          <div class="field-row"><label>Center X (mm)</label><input id="supportSurfaceX" type="number" step="1" value="180"></div>
+          <div class="field-row"><label>Center Y (mm)</label><input id="supportSurfaceY" type="number" step="1" value="0"></div>
+          <div class="field-row"><label>Length X (mm)</label><input id="supportSurfaceSizeX" type="number" min="30" step="1" value="200"></div>
+          <div class="field-row"><label>Width Y (mm)</label><input id="supportSurfaceSizeY" type="number" min="30" step="1" value="200"></div>
+          <div class="field-row"><label>Top height (mm)</label><input id="supportSurfaceTopZ" type="number" min="0" max="300" step="1" value="50"></div>
+          <div class="field-row"><label>Height tolerance (mm)</label><input id="supportSurfaceTolerance" type="number" min="15" max="50" step="1" value="15"></div>
+        </div>
+        <label class="wizard-check"><input id="supportSurfaceEnabled" type="checkbox" checked> Use this surface for localization and collision clearance</label>
+        <div class="helper-text">Measure the top height from the main table. The camera uses the AprilTag size only to select this height range; planning uses the entered height.</div>
+        <div class="program-inspector-actions"><button id="deleteSupportSurfaceBtn" type="button" class="danger">Delete</button><button id="cancelSupportSurfaceBtn" type="button">Cancel</button><button type="submit" class="primary">Save Surface</button></div>
+      </form>
     </dialog>
 
     <script type="importmap">
@@ -420,7 +451,7 @@
         }
       }
     </script>
-    <script type="module" src="/js/main.js?v=55"></script>
+    <script type="module" src="/js/main.js?v=58"></script>
     <script>
       // Inspector tab switching (tiny enough to inline).
       function showTab(name) {
