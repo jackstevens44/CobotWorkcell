@@ -20,6 +20,7 @@ export const state = {
   // workcell
   parts: [],
   registeredParts: [],
+  registeredBins: [],
   tagTrackRevision: 0,
   bins: [],
   supportSurfaces: [],
@@ -96,6 +97,7 @@ export function applySceneSnapshot(payload) {
   if (!payload) return;
   state.parts = payload.parts || [];
   state.registeredParts = payload.registeredParts || state.registeredParts || [];
+  state.registeredBins = payload.registeredBins || state.registeredBins || [];
   state.tagTrackRevision = payload.tagTrackRevision ?? state.tagTrackRevision;
   state.bins = payload.bins || [];
   state.supportSurfaces = payload.supportSurfaces || state.supportSurfaces || [];
@@ -141,9 +143,23 @@ export function applyTagTracks(payload) {
   }
   for (const part of incoming.values()) { next.push(part); membershipChanged = true; }
   state.parts = next;
+  const incomingBins = new Map((payload.bins || []).map((bin) => [bin.id, bin]));
+  const removedBins = new Set(payload.removedBinIds || []);
+  for (const bin of state.bins) {
+    const update = incomingBins.get(bin.id);
+    if (update) {
+      const wasVisible = bin.displayVisible;
+      Object.assign(bin, update);
+      if (!wasVisible && bin.displayVisible) membershipChanged = true;
+    } else if (removedBins.has(bin.id) && bin.trackingMode === "apriltag") {
+      if (bin.displayVisible !== false) membershipChanged = true;
+      bin.displayVisible = false;
+      bin.poseFresh = false;
+    }
+  }
   state.tagTrackRevision = payload.revision;
   if (membershipChanged) emit("scene");
-  else emit("tagTracks", payload.parts || []);
+  else emit("tagTracks", [...(payload.parts || []), ...(payload.bins || [])]);
 }
 
 export function findPart(id) {

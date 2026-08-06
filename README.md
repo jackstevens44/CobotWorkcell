@@ -7,13 +7,15 @@
 [![Offline CI configured](static/docs/offline-ci-badge.svg)](https://github.com/jackstevens44/CobotWorkcell/actions/workflows/ci.yml)
 [![Robot](https://img.shields.io/badge/Robot-myCobot%20280%20M5-2563EB)](https://www.elephantrobotics.com/en/mycobot-en/)
 [![Control](https://img.shields.io/badge/Control-Local%20first-0F766E)](#privacy)
-[![Tests](https://img.shields.io/badge/Offline%20tests-149%20passing-15803D)](#testing)
+[![Tests](https://img.shields.io/badge/Offline%20tests-202%20passing-15803D)](#testing)
 
 > ⚠️ **Early development:** This project is under active development and is not a safety-rated robot controller. Expect changes, test at reduced speed, and supervise every physical motion.
 
 **Initial launch:** July 30, 2026
 
 CobotWorkcell combines a browser-based digital twin, a visual robot programmer, deterministic AprilTag object tracking, calibrated tool geometry, guarded robot jogging, spatial AI commands, and independently validated pick-and-place planning for the Elephant Robotics myCobot 280 M5.
+
+![CobotWorkcell dashboard showing the myCobot digital twin, tracked objects, support surfaces, and robot controls](photos/mainScreen.png)
 
 It is designed for one small tabletop workcell and one important safety principle:
 
@@ -529,18 +531,21 @@ Tag-placement offset and pickup offset are separate. Moving the tag definition d
 
 ### Bins
 
-A bin has dimensions, floor position, color, and a verification state.
+A bin has dimensions, floor position, color, and a verification state. It can be positioned manually or tracked with one of the same 30 mm AprilTags used for parts.
 
 | State | Meaning |
 | --- | --- |
 | `operator_verified` | The saved digital position is treated as matching the real bin |
 | `simulation_only` | The bin was moved virtually and cannot authorize physical placement |
+| `tag_tracked` | A fresh AprilTag pose supplies the physical position and yaw |
 
 After moving a bin in the digital scene:
 
 1. Move the real bin to the displayed location.
 2. Measure or verify it.
 3. Select **Confirm Physical Position** in the inspector.
+
+For a tracked bin, select **Attach AprilTag** in the bin inspector, click a visible unassigned tag, and enter the tag's X/Y offset from the bin center, mounting height above the bin base, and yaw offset. Tags 10–25 are globally unique: one tag can identify either one part or one bin. A tracked bin stays rendered through brief misses, but physical planning is blocked once its accepted pose is more than one second old.
 
 ### Taught points
 
@@ -1166,7 +1171,7 @@ The browser uses a local JSON API served by `web_server.py`.
 | `GET /api/camera/status` | Camera runtime and saved calibration |
 | `GET /api/camera/localization/status` | Current localization quality |
 | `GET /api/camera/tags/visible` | Visible tag polygons and binding state |
-| `GET /api/camera/tag-tracks?since=N` | Incremental live tagged-part pose changes |
+| `GET /api/camera/tag-tracks?since=N` | Incremental live tagged-part and tagged-bin pose changes |
 | `GET /api/camera/debug-frame` | Annotated localization JPEG |
 | `GET /api/camera/devices` | Available camera devices |
 | `GET /api/camera/frame` | Latest camera JPEG |
@@ -1182,6 +1187,8 @@ The browser uses a local JSON API served by `web_server.py`.
 | `POST /api/scene/part/tag-unbind` | Convert a tagged part to virtual at its last valid pose |
 | `POST /api/scene/part/delete` | Delete a part and its registration |
 | `POST /api/scene/bin` | Create or update a bin |
+| `POST /api/scene/bin/tag-binding` | Attach, update, or explicitly reassign a bin AprilTag |
+| `POST /api/scene/bin/tag-unbind` | Keep the last bin pose as simulation-only and remove tag tracking |
 | `POST /api/scene/bin/confirm-position` | Mark the real bin position operator-verified |
 | `POST /api/scene/bin/delete` | Delete a bin |
 | `POST /api/scene/support-surface` | Create or update a raised support surface |

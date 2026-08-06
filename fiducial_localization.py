@@ -390,6 +390,7 @@ class FiducialLocalizer:
 
     def localize(self, jpeg: bytes, camera_config: Dict[str, Any], calibration: Dict[str, Any], draw_debug: bool = True,
                  registered_parts: Optional[List[Dict[str, Any]]] = None,
+                 registered_bins: Optional[List[Dict[str, Any]]] = None,
                  support_surfaces: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         image = decode_jpeg(jpeg)
         height, width = image.shape[:2]
@@ -402,7 +403,11 @@ class FiducialLocalizer:
         corners, ids, rejected = self._detector(dictionary_name).detectMarkers(undistorted)
         ids_flat = [] if ids is None else [int(value) for value in ids.flatten()]
         reference = {int(item["id"]): item for item in fiducials.get("referenceMarkers") or [] if "id" in item}
-        definitions = registered_parts if registered_parts is not None else fiducials.get("objectTags") or []
+        definitions = []
+        for item in (registered_parts if registered_parts is not None else fiducials.get("objectTags") or []):
+            definitions.append({**item, "entityKind": "part", "entityId": item.get("partId")})
+        for item in registered_bins or []:
+            definitions.append({**item, "entityKind": "bin", "entityId": item.get("binId")})
         object_tags = {int(item.get("tagId", item.get("id"))): item for item in definitions if item.get("tagId", item.get("id")) is not None}
         object_tag_ids = set(range(10, 26))
         unknown_ids = sorted(set(ids_flat) - set(reference) - object_tag_ids)
@@ -414,6 +419,9 @@ class FiducialLocalizer:
                 visible_tags.append({
                     "tagId": marker_id, "cornersPx": points.tolist(), "centerPx": points.mean(axis=0).tolist(),
                     "bound": bool(definition), "partId": (definition or {}).get("partId"),
+                    "binId": (definition or {}).get("binId"),
+                    "bindingKind": (definition or {}).get("entityKind"),
+                    "entityId": (definition or {}).get("entityId"),
                     "label": (definition or {}).get("label"),
                 })
 
@@ -429,7 +437,8 @@ class FiducialLocalizer:
                 })
             quality["objectTagStatuses"] = [
                 {
-                    "tagId": tag["tagId"], "partId": tag.get("partId"),
+                    "tagId": tag["tagId"], "partId": tag.get("partId"), "binId": tag.get("binId"),
+                    "bindingKind": tag.get("bindingKind"), "entityId": tag.get("entityId"),
                     "localizationStatus": tag["localizationStatus"],
                     "reason": tag.get("rejectionReason"),
                 }
@@ -821,7 +830,10 @@ class FiducialLocalizer:
             if not config:
                 continue
             points = marker_corners.reshape(4, 2)
-            size = {**{"x": 0.04, "y": 0.04, "z": 0.05}, **(config.get("size") or {})}
+            entity_kind = str(config.get("entityKind") or ("bin" if config.get("binId") else "part"))
+            entity_id = str(config.get("entityId") or config.get("binId") or config.get("partId") or config.get("id") or "")
+            size = {**{"x": 0.04, "y": 0.04, "z": 0.05}, **(config.get("outer") or config.get("size") or {})}
+            mount_height = float(config.get("mountHeightM", size["z"]) if entity_kind == "bin" else size["z"])
             expected_size = float(config.get("tagSizeM") or 0.03)
             surface_diagnostics = {}
             # Backward-compatible direct-call path for old fixtures and saved
@@ -844,7 +856,7 @@ class FiducialLocalizer:
                 geometry_quality = None
             else:
                 maximum_z = max(
-                    [float(item.get("topZ") or 0.0) + float(size["z"]) + 0.08 for item in support_surfaces]
+                    [float(item.get("topZ") or 0.0) + mount_height + 0.08 for item in support_surfaces]
                     or [0.40]
                 )
                 pose, pose_error = self._horizontal_tag_pose(
@@ -854,7 +866,8 @@ class FiducialLocalizer:
                 geometry_quality = deepcopy((pose or {}).get("geometry"))
                 if pose_error:
                     rejection = {
-                        "tagId": marker_id, "partId": config.get("partId"),
+                        "tagId": marker_id, "partId": config.get("partId"), "binId": config.get("binId"),
+                        "bindingKind": entity_kind, "entityId": entity_id,
                         "reason": pose_error, "localizationStatus": "rejected",
                         "tagGeometryQuality": geometry_quality,
                     }
@@ -863,13 +876,13 @@ class FiducialLocalizer:
                     continue
                 tag_center = pose["center"]
                 measured_tag_z = float(pose["z"])
-                measured_support_z = measured_tag_z - float(size["z"])
-                track_key = str(config.get("partId") or config.get("id") or marker_id)
+                measured_support_z = measured_tag_z - mount_height
+                track_key = f"{entity_kind}:{entity_id or marker_id}"
                 surface_positions = {}
                 footprint_margin = (0.0, 0.0)
                 tag_offset = config.get("tagOffsetM") or config.get("centerOffsetM") or {}
                 for candidate_surface in support_surfaces:
-                    candidate_z = float(candidate_surface.get("topZ") or 0.0) + float(size["z"])
+                    candidate_z = float(candidate_surface.get("topZ") or 0.0) + mount_height
                     candidate_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, candidate_z)
                     candidate_center = candidate_corners[:, :2].mean(axis=0)
                     candidate_edge = candidate_corners[1, :2] - candidate_corners[0, :2]
@@ -900,7 +913,8 @@ class FiducialLocalizer:
                 )
                 if surface is None:
                     rejection = {
-                        "tagId": marker_id, "partId": config.get("partId"), "reason": surface_reason,
+                        "tagId": marker_id, "partId": config.get("partId"), "binId": config.get("binId"),
+                        "bindingKind": entity_kind, "entityId": entity_id, "reason": surface_reason,
                         "localizationStatus": "stabilizing" if surface_reason == "support_surface_stabilizing" else "rejected",
                         "measuredTagTopZ": measured_tag_z, "measuredSupportZ": filtered_support_z,
                         "nearestSurfaceId": surface_diagnostics.get("nearestSurfaceId"),
@@ -922,13 +936,14 @@ class FiducialLocalizer:
                 pose_rms = 0.0
                 pose_maximum = 0.0
                 tilt_deg = None
-                canonical_tag_z = float(surface.get("topZ") or 0.0) + float(size["z"])
+                canonical_tag_z = float(surface.get("topZ") or 0.0) + mount_height
                 canonical_corners = self._pixels_on_robot_plane(points, matrix, rvec, tvec, canonical_tag_z)
                 side_lengths = np.linalg.norm(np.roll(canonical_corners[:, :2], -1, axis=0) - canonical_corners[:, :2], axis=1)
                 recovered_size = float(np.mean(side_lengths))
                 if not 0.65 * expected_size <= recovered_size <= 1.35 * expected_size:
                     rejection = {
-                        "tagId": marker_id, "partId": config.get("partId"),
+                        "tagId": marker_id, "partId": config.get("partId"), "binId": config.get("binId"),
+                        "bindingKind": entity_kind, "entityId": entity_id,
                         "reason": "object_tag_size_inconsistent", "localizationStatus": "rejected",
                         "measuredTagTopZ": measured_tag_z, "measuredSupportZ": measured_support_z,
                         "nearestSurfaceId": surface.get("id"),
@@ -945,10 +960,13 @@ class FiducialLocalizer:
             ox, oy = float(offset.get("x", 0.0)), float(offset.get("y", 0.0))
             x = float(tag_center[0]) - math.cos(radians) * ox + math.sin(radians) * oy
             y = float(tag_center[1]) - math.sin(radians) * ox - math.cos(radians) * oy
-            detection = self._detection(config.get("partId") or config.get("id") or f"tag-object-{marker_id}", config.get("label") or f"Tagged Object {marker_id}", config.get("type") or config.get("class") or "box", x, y, yaw, size, points, "object_tag", quality, 0.99)
-            detection["position"]["z"] = float(surface.get("topZ") or 0.0) + float(size["z"]) / 2.0
+            source = "bin_tag" if entity_kind == "bin" else "object_tag"
+            detection = self._detection(entity_id or f"tag-object-{marker_id}", config.get("label") or f"Tagged {entity_kind.title()} {marker_id}", config.get("type") or config.get("class") or "box", x, y, yaw, size, points, source, quality, 0.99)
+            detection["position"]["z"] = float(surface.get("topZ") or 0.0) if entity_kind == "bin" else float(surface.get("topZ") or 0.0) + float(size["z"]) / 2.0
             detection.update({
                 "tagId": marker_id,
+                "entityKind": entity_kind, "entityId": entity_id,
+                "partId": config.get("partId"), "binId": config.get("binId"),
                 "supportSurfaceId": surface.get("id"),
                 "supportSurfaceName": surface.get("name"),
                 "supportSurfaceZ": float(surface.get("topZ") or 0.0),
@@ -969,7 +987,8 @@ class FiducialLocalizer:
             })
             out.append(detection)
             self.last_object_tag_statuses[marker_id] = {
-                "tagId": marker_id, "partId": config.get("partId"),
+                "tagId": marker_id, "partId": config.get("partId"), "binId": config.get("binId"),
+                "bindingKind": entity_kind, "entityId": entity_id,
                 "localizationStatus": "localized", "rejectionReason": None,
                 "measuredTagTopZ": measured_tag_z, "measuredSupportZ": measured_support_z,
                 "nearestSurfaceId": surface.get("id"),
@@ -1097,6 +1116,7 @@ class ContinuousLocalizationRuntime:
                 result = self.localizer.localize(
                     jpeg, snapshot.get("camera") or {}, snapshot.get("calibration") or {},
                     registered_parts=snapshot.get("registeredParts") or [],
+                    registered_bins=snapshot.get("registeredBins") or [],
                     support_surfaces=snapshot.get("supportSurfaces") or [],
                 )
                 observed_part_ids = [
@@ -1108,12 +1128,22 @@ class ContinuousLocalizationRuntime:
                     for item in ((result.get("quality") or {}).get("objectTagRejections") or [])
                     if item.get("partId")
                 }
+                observed_bin_ids = [
+                    str(item.get("binId")) for item in (result.get("visibleTags") or [])
+                    if item.get("bound") and item.get("bindingKind") == "bin" and item.get("binId")
+                ]
+                rejection_by_bin = {
+                    str(item.get("binId")): item
+                    for item in ((result.get("quality") or {}).get("objectTagRejections") or [])
+                    if item.get("binId")
+                }
                 if result.get("ok"):
                     tracks = self.scene.ingest_tag_tracks(
                         result.get("detections") or [], timestamp=time.time(), valid=True,
                         observed_part_ids=observed_part_ids, rejection_by_part=rejection_by_part,
+                        observed_bin_ids=observed_bin_ids, rejection_by_bin=rejection_by_bin,
                     )
-                    result["accepted"] = len(tracks.get("parts") or [])
+                    result["accepted"] = len(tracks.get("parts") or []) + len(tracks.get("bins") or [])
             if not result.get("ok"):
                 self.scene.ingest_tag_tracks(
                     [], timestamp=time.time(), valid=False,
@@ -1124,6 +1154,14 @@ class ContinuousLocalizationRuntime:
                     rejection_by_part={
                         str(item.get("partId")): item for item in (result.get("visibleTags") or [])
                         if item.get("bound") and item.get("partId")
+                    },
+                    observed_bin_ids=[
+                        str(item.get("binId")) for item in (result.get("visibleTags") or [])
+                        if item.get("bound") and item.get("bindingKind") == "bin" and item.get("binId")
+                    ],
+                    rejection_by_bin={
+                        str(item.get("binId")): {**item, "reason": item.get("reason") or item.get("rejectionReason")} for item in (result.get("visibleTags") or [])
+                        if item.get("bound") and item.get("bindingKind") == "bin" and item.get("binId")
                     },
                 )
         with self.lock:

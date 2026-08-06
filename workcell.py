@@ -632,12 +632,22 @@ class Workcell:
     def _save_locked(self) -> None:
         self.version += 1
         self.updated_at = time.time()
+        transient_bin_keys = {
+            "trackingState", "poseFresh", "displayVisible", "lastSeenAt", "lastObservedAt",
+            "lastLocalizedAt", "poseQuality", "supportSurfaceId", "supportSurfaceName",
+            "supportSurfaceZ", "measuredTagTopZ", "measuredSupportZ", "supportHeightResidualM",
+            "localizationRejection",
+        }
         payload = {
             "version": self.version,
             "counter": self._counter,
             "parts": [part for part in self.parts.values() if part.get("trackingMode") != "apriltag"],
             "registeredParts": list(self.registered_parts.values()),
-            "bins": list(self.bins.values()),
+            "bins": [
+                {key: value for key, value in bin_obj.items() if key not in transient_bin_keys}
+                for bin_obj in self.bins.values()
+            ],
+            "registeredBins": list(self.registered_bins.values()),
             "supportSurfaces": list(self.support_surfaces.values()),
             "taughtPoints": list(self.taught_points.values()),
             "programs": list(self.programs.values()),
@@ -763,6 +773,9 @@ class Workcell:
             requested_part_id = str(body.get("partId") or body.get("id") or "")
             part_id = requested_part_id or self._next_id("part")
             conflict = next((item for item in self.registered_parts.values() if int(item.get("tagId", -1)) == tag_id and item.get("partId") != part_id), None)
+            bin_conflict = next((item for item in self.registered_bins.values() if int(item.get("tagId", -1)) == tag_id), None)
+            if bin_conflict and not body.get("reassign"):
+                return {"ok": False, "error": f"Tag {tag_id} is already assigned to bin {bin_conflict.get('label') or bin_conflict['binId']}.", "requiresReassign": True, "conflictingBinId": bin_conflict["binId"]}
             if conflict and not body.get("reassign"):
                 return {"ok": False, "error": f"Tag {tag_id} is already assigned to {conflict.get('label') or conflict['partId']}.", "requiresReassign": True, "conflictingPartId": conflict["partId"]}
             if conflict:
@@ -773,6 +786,8 @@ class Workcell:
                     old.pop("tagId", None)
                 self.tag_last_seen.pop(str(conflict["partId"]), None)
                 self.tag_last_observed.pop(str(conflict["partId"]), None)
+            if bin_conflict:
+                self._unbind_tagged_bin_locked(str(bin_conflict["binId"]))
             existing_definition = self.registered_parts.get(part_id) or {}
             existing_part = self.parts.get(part_id) or {}
             raw_size = body.get("size") or existing_definition.get("size") or existing_part.get("size") or {}
@@ -844,6 +859,13 @@ class Workcell:
         # but rejected frame must not latch a recent valid pose stale.
         return bool(localized_at and float(now or time.time()) - localized_at <= fresh_s)
 
+    def _bin_pose_is_fresh_locked(self, bin_obj: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
+        if not bin_obj or bin_obj.get("trackingMode") != "apriltag":
+            return bool(bin_obj)
+        _, fresh_s = self._tag_tracking_limits()
+        localized_at = float(bin_obj.get("lastLocalizedAt") or 0.0)
+        return bool(localized_at and float(now or time.time()) - localized_at <= fresh_s)
+
     def tag_pose_is_fresh(self, part: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
         with self.lock:
             return self._tag_pose_is_fresh_locked(part, now)
@@ -907,13 +929,17 @@ class Workcell:
         self, detections: List[Dict[str, Any]], timestamp: Optional[float] = None,
         valid: bool = True, observed_part_ids: Optional[List[str]] = None,
         rejection_by_part: Optional[Dict[str, Dict[str, Any]]] = None,
-        force_remove: bool = False,
+        force_remove: bool = False, observed_bin_ids: Optional[List[str]] = None,
+        rejection_by_bin: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Update live tagged objects without persisting per-frame camera state."""
         now = float(timestamp or time.time())
         by_id = {str(item.get("id") or ""): item for item in detections if item.get("localizationSource") == "object_tag"}
         observed_ids = {str(value) for value in (observed_part_ids or []) if value}
         rejections = rejection_by_part or {}
+        bin_by_id = {str(item.get("id") or ""): item for item in detections if item.get("localizationSource") == "bin_tag"}
+        observed_bins = {str(value) for value in (observed_bin_ids or []) if value}
+        bin_rejections = rejection_by_bin or {}
         with self.lock:
             retention_s, fresh_s = self._tag_tracking_limits()
             pose_changed = False
@@ -1003,6 +1029,62 @@ class Workcell:
                         self.tag_last_observed.pop(part_id, None)
                         pose_changed = True
                         membership_changed = True
+            for bin_id, definition in self.registered_bins.items():
+                bin_obj = self.bins.get(bin_id)
+                if not bin_obj:
+                    continue
+                detection = bin_by_id.get(bin_id) if valid else None
+                if detection:
+                    previous = deepcopy(bin_obj.get("position") or {})
+                    previous_surface = bin_obj.get("supportSurfaceId")
+                    bin_obj.update({
+                        "position": deepcopy(detection.get("position") or bin_obj.get("position")),
+                        "orientationDeg": float(detection.get("orientationDeg") or 0.0),
+                        "trackingMode": "apriltag", "tagId": definition["tagId"],
+                        "positionStatus": "tag_tracked", "positionSource": "camera",
+                        "trackingState": "tracked", "poseFresh": True, "displayVisible": True,
+                        "lastSeenAt": now, "lastObservedAt": now, "lastLocalizedAt": now,
+                        "poseQuality": deepcopy(detection.get("poseQuality")),
+                        "supportSurfaceId": detection.get("supportSurfaceId"),
+                        "supportSurfaceName": detection.get("supportSurfaceName"),
+                        "supportSurfaceZ": detection.get("supportSurfaceZ"),
+                        "measuredTagTopZ": detection.get("measuredTagTopZ"),
+                        "measuredSupportZ": detection.get("measuredSupportZ"),
+                        "supportHeightResidualM": detection.get("supportHeightResidualM"),
+                    })
+                    bin_obj.pop("localizationRejection", None)
+                    definition["lastSeenAt"] = now
+                    definition["lastObservedAt"] = now
+                    moved_m = math.hypot(
+                        float((bin_obj.get("position") or {}).get("x", 0.0)) - float(previous.get("x", 0.0)),
+                        float((bin_obj.get("position") or {}).get("y", 0.0)) - float(previous.get("y", 0.0)),
+                    )
+                    if moved_m > 0.005 or (previous_surface and previous_surface != bin_obj.get("supportSurfaceId")):
+                        self.invalidate_compiled_cycles_locked("tracked_bin_moved")
+                    pose_changed = True
+                elif bin_id in observed_bins:
+                    bin_obj["lastObservedAt"] = now
+                    definition["lastObservedAt"] = now
+                    rejection = deepcopy(bin_rejections.get(bin_id) or {})
+                    recent = self._bin_pose_is_fresh_locked(bin_obj, now)
+                    bin_obj.update({
+                        "trackingState": "degraded_recent" if recent else (
+                            "stabilizing" if rejection.get("reason") == "support_surface_stabilizing"
+                            else "observed_unlocalized"
+                        ),
+                        "poseFresh": recent, "displayVisible": True,
+                        "localizationRejection": rejection,
+                    })
+                    pose_changed = True
+                else:
+                    localized_at = float(bin_obj.get("lastLocalizedAt") or 0.0)
+                    observed_at = float(bin_obj.get("lastObservedAt") or localized_at)
+                    fresh = bool(localized_at and now - localized_at <= fresh_s)
+                    display = bool(not force_remove and observed_at and now - observed_at < retention_s)
+                    next_state = "tracked" if fresh else "temporarily_lost"
+                    if (bin_obj.get("poseFresh"), bin_obj.get("displayVisible"), bin_obj.get("trackingState")) != (fresh, display, next_state):
+                        bin_obj.update({"poseFresh": fresh, "displayVisible": display, "trackingState": next_state})
+                        pose_changed = True
             if pose_changed:
                 self.tag_track_revision += 1
                 self.updated_at = now
@@ -1010,9 +1092,10 @@ class Workcell:
             # high-rate poses travel through the lightweight track endpoint.
             if membership_changed:
                 self.version += 1
-            return self.tag_tracks_locked()
+            return self.tag_tracks_locked(now)
 
-    def tag_tracks_locked(self) -> Dict[str, Any]:
+    def tag_tracks_locked(self, now: Optional[float] = None) -> Dict[str, Any]:
+        current_time = float(now or time.time())
         visible = [
             self._part_with_camera_status(deepcopy(part))
             for part in self.parts.values() if part.get("trackingMode") == "apriltag"
@@ -1021,9 +1104,23 @@ class Workcell:
             if not part.get("poseFresh") and part.get("trackingState") == "tracked":
                 part["trackingState"] = "temporarily_lost"
         visible_ids = {part["id"] for part in visible}
+        bins = []
+        removed_bin_ids = []
+        for bin_id, definition in self.registered_bins.items():
+            bin_obj = self.bins.get(bin_id)
+            if not bin_obj:
+                continue
+            item = self._bin_with_geometry(deepcopy(bin_obj))
+            item["poseFresh"] = self._bin_pose_is_fresh_locked(bin_obj, current_time)
+            item["displayVisible"] = bool(bin_obj.get("displayVisible", False))
+            if item["displayVisible"]:
+                bins.append(item)
+            else:
+                removed_bin_ids.append(bin_id)
         return {
-            "ok": True, "revision": self.tag_track_revision, "timestamp": time.time(),
+            "ok": True, "revision": self.tag_track_revision, "timestamp": current_time,
             "parts": visible, "removedIds": sorted(set(self.registered_parts) - visible_ids),
+            "bins": bins, "removedBinIds": sorted(removed_bin_ids),
         }
 
     def tag_tracks(self, since: Optional[int] = None) -> Dict[str, Any]:
@@ -1032,6 +1129,7 @@ class Workcell:
                 return {
                     "ok": True, "revision": self.tag_track_revision, "timestamp": time.time(),
                     "parts": [], "removedIds": [], "unchanged": True,
+                    "bins": [], "removedBinIds": [],
                 }
             return self.tag_tracks_locked()
 
@@ -1233,6 +1331,33 @@ class Workcell:
         with self.lock:
             existing = self.bins.get(str(body.get("id") or ""))
             bin_obj = self.normalized_bin(body, existing)
+            definition = self.registered_bins.get(bin_obj["id"])
+            if definition and existing:
+                # Camera pose is authoritative while a bin is tag tracked.
+                bin_obj["position"] = deepcopy(existing.get("position"))
+                bin_obj["orientationDeg"] = existing.get("orientationDeg", 0.0)
+                for key in (
+                    "trackingMode", "tagId", "trackingState", "poseFresh", "displayVisible",
+                    "lastSeenAt", "lastObservedAt", "lastLocalizedAt", "poseQuality",
+                    "supportSurfaceId", "supportSurfaceName", "supportSurfaceZ",
+                    "measuredTagTopZ", "measuredSupportZ", "supportHeightResidualM",
+                    "localizationRejection",
+                ):
+                    if key in existing:
+                        bin_obj[key] = deepcopy(existing[key])
+                definition["label"] = bin_obj["label"]
+                definition["mountHeightM"] = clamp(
+                    body.get("mountHeightM", definition.get("mountHeightM", bin_obj["outer"]["z"])),
+                    0.0, 0.30,
+                )
+                if isinstance(body.get("tagOffsetM"), dict):
+                    definition["tagOffsetM"] = {
+                        "x": clamp(body["tagOffsetM"].get("x", 0.0), -0.40, 0.40),
+                        "y": clamp(body["tagOffsetM"].get("y", 0.0), -0.40, 0.40),
+                    }
+                if "yawOffsetDeg" in body:
+                    definition["yawOffsetDeg"] = _wrap_deg(body.get("yawOffsetDeg") or 0.0)
+                definition["updatedAt"] = time.time()
             self.bins[bin_obj["id"]] = bin_obj
             self.invalidate_compiled_cycles_locked("bin_changed")
             self._save_locked()
@@ -1241,15 +1366,109 @@ class Workcell:
     def delete_bin(self, bin_id: str) -> Dict[str, Any]:
         with self.lock:
             self.bins.pop(str(bin_id), None)
+            self.registered_bins.pop(str(bin_id), None)
             self.invalidate_compiled_cycles_locked("bin_deleted")
             self._save_locked()
             return self.snapshot_locked()
+
+    def _unbind_tagged_bin_locked(self, bin_id: str) -> Optional[Dict[str, Any]]:
+        definition = self.registered_bins.pop(str(bin_id), None)
+        bin_obj = self.bins.get(str(bin_id))
+        if bin_obj:
+            for key in (
+                "trackingMode", "tagId", "trackingState", "poseFresh", "displayVisible",
+                "lastSeenAt", "lastObservedAt", "lastLocalizedAt", "poseQuality",
+                "supportSurfaceId", "supportSurfaceName", "supportSurfaceZ",
+                "measuredTagTopZ", "measuredSupportZ", "supportHeightResidualM",
+                "localizationRejection",
+            ):
+                bin_obj.pop(key, None)
+            bin_obj.update({
+                "positionStatus": "simulation_only", "positionSource": "tag_unbound",
+                "updatedAt": time.time(),
+            })
+        return definition
+
+    def bind_tagged_bin(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            tag_id = int(body.get("tagId", -1))
+        except (TypeError, ValueError):
+            tag_id = -1
+        if not 10 <= tag_id <= 25:
+            return {"ok": False, "error": "Bin AprilTag ID must be between 10 and 25."}
+        with self.lock:
+            bin_id = str(body.get("binId") or body.get("id") or "")
+            bin_obj = self.bins.get(bin_id)
+            if not bin_obj:
+                return {"ok": False, "error": "Bin was not found."}
+            part_conflict = next(
+                (item for item in self.registered_parts.values() if int(item.get("tagId", -1)) == tag_id),
+                None,
+            )
+            bin_conflict = next(
+                (item for item in self.registered_bins.values()
+                 if int(item.get("tagId", -1)) == tag_id and item.get("binId") != bin_id),
+                None,
+            )
+            conflict = part_conflict or bin_conflict
+            if conflict and not body.get("reassign"):
+                kind = "part" if part_conflict else "bin"
+                entity_id = conflict.get("partId") if part_conflict else conflict.get("binId")
+                return {
+                    "ok": False,
+                    "error": f"Tag {tag_id} is already assigned to {kind} {conflict.get('label') or entity_id}.",
+                    "requiresReassign": True, "conflictingKind": kind, "conflictingEntityId": entity_id,
+                }
+            if part_conflict:
+                old_part_id = str(part_conflict["partId"])
+                old = self.parts.get(old_part_id)
+                self.registered_parts.pop(old_part_id, None)
+                if old:
+                    old.update({"trackingMode": "virtual", "source": "manual"})
+                    old.pop("tagId", None)
+            if bin_conflict:
+                self._unbind_tagged_bin_locked(str(bin_conflict["binId"]))
+            previous = self.registered_bins.get(bin_id) or {}
+            raw_offset = body.get("tagOffsetM") or previous.get("tagOffsetM") or {}
+            definition = {
+                "binId": bin_id, "tagId": tag_id, "label": bin_obj.get("label") or bin_id,
+                "tagSizeM": 0.03,
+                "tagOffsetM": {
+                    "x": clamp(raw_offset.get("x", 0.0), -0.40, 0.40),
+                    "y": clamp(raw_offset.get("y", 0.0), -0.40, 0.40),
+                },
+                "mountHeightM": clamp(
+                    body.get("mountHeightM", previous.get("mountHeightM", bin_obj["outer"]["z"])),
+                    0.0, 0.30,
+                ),
+                "yawOffsetDeg": _wrap_deg(body.get("yawOffsetDeg", previous.get("yawOffsetDeg", 0.0)) or 0.0),
+                "lastSeenAt": previous.get("lastSeenAt"), "updatedAt": time.time(),
+            }
+            self.registered_bins[bin_id] = definition
+            bin_obj.update({
+                "trackingMode": "apriltag", "tagId": tag_id,
+                "trackingState": "not_visible", "poseFresh": False, "displayVisible": False,
+                "positionStatus": "tag_pending", "positionSource": "apriltag",
+            })
+            self.invalidate_compiled_cycles_locked("bin_tag_binding_changed")
+            self._save_locked()
+            return {**self.snapshot_locked(), "registeredBin": deepcopy(definition)}
+
+    def unbind_tagged_bin(self, bin_id: str) -> Dict[str, Any]:
+        with self.lock:
+            if not self._unbind_tagged_bin_locked(str(bin_id)):
+                return {"ok": False, "error": "Tagged bin registration was not found."}
+            self.invalidate_compiled_cycles_locked("bin_tag_unbound")
+            self._save_locked()
+            return {**self.snapshot_locked(), "bin": self._bin_with_geometry(self.bins[str(bin_id)])}
 
     def confirm_bin_position(self, bin_id: str) -> Dict[str, Any]:
         with self.lock:
             bin_obj = self.bins.get(str(bin_id))
             if bin_obj is None:
                 return {"ok": False, "error": "Bin was not found."}
+            if bin_obj.get("trackingMode") == "apriltag":
+                return {"ok": False, "error": "A tracked bin position is confirmed by its fresh AprilTag pose, not manually."}
             bin_obj["positionStatus"] = "operator_verified"
             bin_obj["positionSource"] = "operator_confirmation"
             bin_obj["positionVerifiedAt"] = time.time()
@@ -1705,6 +1924,8 @@ class Workcell:
                 bin_obj = self.bins.get(str(destination.get("binId") or body.get("destinationId") or ""))
                 if bin_obj is None:
                     return {"ok": False, "error": "Destination bin was not found."}
+                if bin_obj.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(bin_obj):
+                    return {"ok": False, "error": f"{bin_obj.get('label') or bin_obj['id']} does not have a fresh AprilTag pose."}
                 geometry = self.bin_geometry(bin_obj)
                 part_hx, part_hy = self._entity_footprint(entity)
                 if (
@@ -1724,6 +1945,8 @@ class Workcell:
                 reference = (self.bins if reference_kind == "bin" else self.parts).get(reference_id)
                 if reference is None:
                     return {"ok": False, "error": "Reference object for next-to placement was not found."}
+                if reference_kind == "bin" and reference.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(reference):
+                    return {"ok": False, "error": f"{reference.get('label') or reference_id} does not have a fresh AprilTag pose."}
                 entity_hx, entity_hy = self._entity_footprint(entity)
                 ref_hx, ref_hy = self._entity_footprint(reference)
                 ref_position = reference.get("position") or {}
@@ -1768,10 +1991,13 @@ class Workcell:
                     "halfExtents": {"x": half_x, "y": half_y},
                 })
             for bin_obj in self.bins.values():
+                if bin_obj.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(bin_obj):
+                    continue
                 entities.append({
                     "kind": "bin", "id": bin_obj["id"], "label": bin_obj.get("label"),
                     "position": deepcopy(bin_obj.get("position")), "size": deepcopy(bin_obj.get("outer")),
                     "positionStatus": bin_obj.get("positionStatus"),
+                    "trackingMode": bin_obj.get("trackingMode"),
                 })
                 half_x, half_y = self._entity_footprint(bin_obj)
                 occupancy.append({
@@ -1817,6 +2043,19 @@ class Workcell:
                         "entityId": definition["partId"],
                         "code": "tag_not_visible",
                         "message": f"{definition.get('label') or definition['partId']} is registered but its AprilTag is not currently visible, so it has no usable position.",
+                    })
+            for definition in self.registered_bins.values():
+                live = self.bins.get(str(definition.get("binId")))
+                visible = self._bin_pose_is_fresh_locked(live)
+                registered_inventory.append({
+                    "kind": "bin", "binId": definition["binId"], "tagId": definition.get("tagId"),
+                    "label": definition.get("label"), "visible": visible,
+                    "trackingState": (live or {}).get("trackingState") or "not_visible",
+                })
+                if not visible:
+                    availability_warnings.append({
+                        "entityId": definition["binId"], "code": "tag_not_visible",
+                        "message": f"{definition.get('label') or definition['binId']} is registered but its AprilTag has no fresh usable position.",
                     })
             workspace_markers = [
                 {
@@ -1866,6 +2105,33 @@ class Workcell:
                 item.pop("position", None)
                 item.pop("orientationDeg", None)
             registered.append(item)
+        registered_bins = []
+        for definition in self.registered_bins.values():
+            item = deepcopy(definition)
+            live = self.bins.get(str(item.get("binId")))
+            fresh = self._bin_pose_is_fresh_locked(live)
+            item.update({
+                "visible": fresh,
+                "displayVisible": bool((live or {}).get("displayVisible", False)),
+                "trackingState": (live or {}).get("trackingState") or "not_visible",
+                "poseFresh": fresh,
+                "lastObservedAt": (live or {}).get("lastObservedAt") or item.get("lastObservedAt"),
+                "lastLocalizedAt": (live or {}).get("lastLocalizedAt"),
+                "outer": deepcopy((live or {}).get("outer") or {}),
+            })
+            if fresh:
+                item["position"] = deepcopy(live.get("position"))
+                item["orientationDeg"] = live.get("orientationDeg", 0.0)
+                item["supportSurfaceId"] = live.get("supportSurfaceId")
+            registered_bins.append(item)
+        bins = []
+        for bin_obj in self.bins.values():
+            item = self._bin_with_geometry(deepcopy(bin_obj))
+            if item.get("trackingMode") == "apriltag":
+                item["poseFresh"] = self._bin_pose_is_fresh_locked(bin_obj)
+                item["stale"] = not item["poseFresh"]
+                item["displayVisible"] = bool(bin_obj.get("displayVisible", False))
+            bins.append(item)
         return {
             "ok": True,
             "frame": "robot_base_meters",
@@ -1873,8 +2139,9 @@ class Workcell:
             "updatedAt": self.updated_at,
             "parts": parts,
             "registeredParts": registered,
+            "registeredBins": registered_bins,
             "tagTrackRevision": self.tag_track_revision,
-            "bins": [self._bin_with_geometry(b) for b in self.bins.values()],
+            "bins": bins,
             "supportSurfaces": deepcopy(list(self.support_surfaces.values())),
             "supportSurfaceRevision": self.support_surface_revision(),
             "taughtPoints": deepcopy(list(self.taught_points.values())),
@@ -1911,6 +2178,10 @@ class Workcell:
             ]
             result["parts"] = safe_parts
             result["objects"] = deepcopy(safe_parts)
+            result["bins"] = [
+                bin_obj for bin_obj in result.get("bins", [])
+                if bin_obj.get("trackingMode") != "apriltag" or bin_obj.get("poseFresh")
+            ]
             return result
 
     def clear_parts(self) -> Dict[str, Any]:
@@ -2467,7 +2738,12 @@ class Workcell:
                     current_bin = self.bins.get(destination_id)
                     if current_bin is None:
                         return f"Destination bin '{destination_id}' no longer exists; plan again."
-                    if current_bin.get("positionStatus") != "operator_verified":
+                    if current_bin.get("trackingMode") == "apriltag":
+                        if not self._bin_pose_is_fresh_locked(current_bin):
+                            return f"{current_bin.get('label') or destination_id} does not have a fresh AprilTag pose; plan again."
+                        if snapshot.get("supportSurfaceId") and current_bin.get("supportSurfaceId") != snapshot.get("supportSurfaceId"):
+                            return f"{current_bin.get('label') or destination_id} changed support surfaces after planning; plan again."
+                    elif current_bin.get("positionStatus") != "operator_verified":
                         return (
                             f"{current_bin.get('label') or destination_id} exists only at a simulated position. "
                             "Move the real bin there and confirm its position before running."
@@ -2715,12 +2991,17 @@ class Workcell:
                     return {"ok": False, "error": f"Place destination for {part['label']} not found."}
                 if destination.get("kind") == "bin":
                     destination_bin = destination["bin"]
+                    if destination_bin.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(destination_bin):
+                        return {"ok": False, "error": f"{destination_bin.get('label') or destination_bin['id']} does not have a fresh AprilTag pose."}
                     destination_snapshots[destination_bin["id"]] = {
                         "kind": "bin",
                         "id": destination_bin["id"],
                         "label": destination_bin.get("label"),
                         "position": deepcopy(destination_bin.get("position")),
                         "positionStatus": destination_bin.get("positionStatus", "operator_verified"),
+                        "trackingMode": destination_bin.get("trackingMode"),
+                        "lastLocalizedAt": destination_bin.get("lastLocalizedAt"),
+                        "supportSurfaceId": destination_bin.get("supportSurfaceId"),
                     }
                     if destination_bin.get("positionStatus") == "simulation_only":
                         notes.append(

@@ -312,6 +312,28 @@
             </form>
           </dialog>
 
+          <dialog id="binTagDialog" class="calibration-dialog part-wizard-dialog">
+            <form id="binTagForm" class="calibration-shell" method="dialog">
+              <header class="calibration-header">
+                <div><div class="eyebrow">Spatial bin setup</div><h2 id="binTagTitle">Attach AprilTag</h2></div>
+                <button id="binTagCloseBtn" type="button">Close</button>
+              </header>
+              <div class="part-wizard-body">
+                <p>Place one 30 mm tag flat on the top rim or a rigid upward-facing bracket, then click it below.</p>
+                <div class="tag-picker-stage"><img id="binTagCamera" alt="Live bin tag picker"><svg id="binTagOverlay" aria-label="Detected bin tags"></svg></div>
+                <div id="binVisibleTagChoices" class="visible-tag-choices"><span class="helper-text">Looking for object tags 10–25…</span></div>
+                <div class="field-grid three">
+                  <div class="field-row"><label for="binTagOffsetX">Center offset X (mm)</label><input id="binTagOffsetX" type="number" step="1" value="0"></div>
+                  <div class="field-row"><label for="binTagOffsetY">Center offset Y (mm)</label><input id="binTagOffsetY" type="number" step="1" value="0"></div>
+                  <div class="field-row"><label for="binTagMountHeight">Tag height above base (mm)</label><input id="binTagMountHeight" type="number" min="0" max="300" step="1" value="20"></div>
+                </div>
+                <div class="field-row"><label for="binTagYaw">Tag-to-bin yaw offset (degrees)</label><input id="binTagYaw" type="number" min="-180" max="180" step="1" value="0"></div>
+                <div id="binTagResult" class="wizard-result">Click a visible tag to assign it.</div>
+              </div>
+              <footer class="calibration-footer"><button id="binTagCancelBtn" type="button">Cancel</button><span></span><button type="submit" class="primary">Save Bin Tag</button></footer>
+            </form>
+          </dialog>
+
           <dialog id="pointWizardDialog" class="calibration-dialog point-wizard-dialog">
             <form id="pointWizardForm" class="calibration-shell" method="dialog">
               <header class="calibration-header">
