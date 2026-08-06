@@ -253,6 +253,7 @@ class Workcell:
         self.path = data_dir / "workcell.json"
         self.parts: Dict[str, Dict[str, Any]] = {}
         self.registered_parts: Dict[str, Dict[str, Any]] = {}
+        self.registered_bins: Dict[str, Dict[str, Any]] = {}
         self.tag_track_revision = 0
         self.tag_last_seen: Dict[str, float] = {}
         self.bins: Dict[str, Dict[str, Any]] = {}
@@ -399,12 +400,46 @@ class Workcell:
             except (TypeError, ValueError):
                 continue
             self.bins[bin_obj["id"]] = bin_obj
+        self.registered_bins = {}
+        for item in records("registeredBins"):
+            try:
+                tag_id = int(item.get("tagId", -1))
+            except (TypeError, ValueError):
+                continue
+            bin_id = str(item.get("binId") or "")
+            if (
+                not bin_id or bin_id not in self.bins or not 10 <= tag_id <= 25
+                or tag_id in loaded_tag_ids
+            ):
+                continue
+            raw_offset = item.get("tagOffsetM") if isinstance(item.get("tagOffsetM"), dict) else {}
+            self.registered_bins[bin_id] = {
+                **item,
+                "binId": bin_id,
+                "tagId": tag_id,
+                "tagSizeM": 0.03,
+                "tagOffsetM": {
+                    "x": clamp(raw_offset.get("x", 0.0), -0.40, 0.40),
+                    "y": clamp(raw_offset.get("y", 0.0), -0.40, 0.40),
+                },
+                "mountHeightM": clamp(
+                    item.get("mountHeightM", self.bins[bin_id]["outer"]["z"]), 0.0, 0.30
+                ),
+                "yawOffsetDeg": _wrap_deg(item.get("yawOffsetDeg", 0.0) or 0.0),
+            }
+            loaded_tag_ids.add(tag_id)
         for bin_obj in self.bins.values():
             # Existing saved bins predate verification state and are assumed
             # to match the operator's established physical layout. Any future
             # AI/viewport relocation explicitly changes this to simulation_only.
             bin_obj.setdefault("positionStatus", "operator_verified")
             bin_obj.setdefault("positionSource", "legacy_or_operator")
+            if bin_obj["id"] in self.registered_bins:
+                definition = self.registered_bins[bin_obj["id"]]
+                bin_obj.update({
+                    "trackingMode": "apriltag", "tagId": definition["tagId"],
+                    "trackingState": "not_visible", "poseFresh": False,
+                })
         self.taught_points = {}
         for point in records("taughtPoints"):
             coords = point.get("firmwareFlangeCoordsMmDeg")
