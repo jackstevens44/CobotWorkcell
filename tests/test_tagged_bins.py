@@ -169,5 +169,13 @@ class TaggedBinLocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(found["orientationDeg"], yaw, places=4)
 
 
+class TaggedBinUiContractTests(unittest.TestCase):
+    def test_tracked_position_status_is_not_inserted_into_three_column_grid(self):
+        source = (Path(__file__).resolve().parents[1] / "static" / "js" / "ui.js").read_text()
+        self.assertIn("position.body.append(tracked);", source)
+        self.assertNotIn("positionGrid.append(tracked);", source)
+        self.assertIn("is providing a fresh physical position and rotation", source)
+
+
 if __name__ == "__main__":
     unittest.main()

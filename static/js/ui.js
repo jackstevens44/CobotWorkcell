@@ -1173,35 +1173,33 @@ function renderBinInspector(container, bin) {
     const tracked = document.createElement("div");
     tracked.className = bin.poseFresh ? "success-callout" : "tag-pose-warning";
     tracked.textContent = bin.poseFresh
-      ? `Position and rotation are live from AprilTag ${bin.tagId}.`
+      ? `AprilTag ${bin.tagId} is providing a fresh physical position and rotation.`
       : `AprilTag ${bin.tagId} is ${String(bin.trackingState || "not visible").replaceAll("_", " ")}; physical use is blocked.`;
-    positionGrid.append(tracked);
+    position.body.append(tracked);
   } else {
     positionGrid.append(
       numberField("X", bin.position.x, 0.005, "position.x", (v) => { markSimulated(); bin.position.x = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
       numberField("Y", bin.position.y, 0.005, "position.y", (v) => { markSimulated(); bin.position.y = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
       numberField("Z", bin.position.z, 0.005, "position.z", (v) => { markSimulated(); bin.position.z = clamp(v, 0, 0.2); saveBin(bin); }),
     );
-  }
-  position.body.append(positionGrid);
-  const verification = document.createElement("div");
-  verification.className = (bin.positionStatus === "operator_verified" || bin.poseFresh) ? "success-callout" : "tag-pose-warning";
-  verification.textContent = bin.poseFresh
-    ? "Fresh camera-tracked physical position."
-    : bin.positionStatus === "operator_verified"
-    ? "Physical position confirmed."
-    : "Simulation only: move the real bin to this location before physical use.";
-  position.body.append(verification);
-  if (bin.trackingMode !== "apriltag" && bin.positionStatus !== "operator_verified") {
-    const confirm = document.createElement("button");
-    confirm.type = "button";
-    confirm.textContent = "I Moved the Real Bin Here";
-    confirm.addEventListener("click", async () => {
-      applySceneSnapshot(await post("/api/scene/bin/confirm-position", { binId: bin.id }));
-      renderInspector();
-      updateStatus(`Confirmed ${bin.label}'s physical position.`);
-    });
-    position.body.append(confirm);
+    position.body.append(positionGrid);
+    const verification = document.createElement("div");
+    verification.className = bin.positionStatus === "operator_verified" ? "success-callout" : "tag-pose-warning";
+    verification.textContent = bin.positionStatus === "operator_verified"
+      ? "Physical position confirmed."
+      : "Simulation only: move the real bin to this location before physical use.";
+    position.body.append(verification);
+    if (bin.positionStatus !== "operator_verified") {
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.textContent = "I Moved the Real Bin Here";
+      confirm.addEventListener("click", async () => {
+        applySceneSnapshot(await post("/api/scene/bin/confirm-position", { binId: bin.id }));
+        renderInspector();
+        updateStatus(`Confirmed ${bin.label}'s physical position.`);
+      });
+      position.body.append(confirm);
+    }
   }
   container.append(position.details);
 
