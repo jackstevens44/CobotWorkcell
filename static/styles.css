@@ -395,6 +395,9 @@ textarea { width: 100%; resize: vertical; }
 .tag-picker-stage img { z-index:1; pointer-events:none; }
 .tag-picker-stage polygon { pointer-events:all; cursor:pointer; fill:rgba(37,99,235,.22); stroke:#60a5fa; stroke-width:3; vector-effect:non-scaling-stroke; }
 .tag-picker-stage polygon.bound { fill:rgba(245,158,11,.22); stroke:#f59e0b; }
+.tag-picker-stage polygon.localized { fill:rgba(34,197,94,.20); stroke:#16a34a; }
+.tag-picker-stage polygon.stabilizing { fill:rgba(245,158,11,.24); stroke:#f59e0b; }
+.tag-picker-stage polygon.rejected { fill:rgba(239,68,68,.20); stroke:#dc2626; }
 .tag-picker-stage polygon.selected { fill:rgba(34,197,94,.32); stroke:#22c55e; stroke-width:5; }
 .tag-picker-stage text { fill:#fff; font:bold 20px system-ui; paint-order:stroke; stroke:#0f172a; stroke-width:4px; pointer-events:none; }
 .visible-tag-panel { display:grid; gap:9px; padding:12px; border:1px solid var(--line); border-radius:10px; background:#f7f9fc; }
@@ -428,7 +431,7 @@ textarea { width: 100%; resize: vertical; }
   height: 100%;
   overflow: hidden;
   display: grid;
-  grid-template-rows: 64px minmax(0, 1fr) 62px;
+  grid-template-rows: 86px minmax(0, 1fr) 62px;
 }
 .program-workspace-header, .program-workspace-footer {
   min-width: 0;
@@ -462,9 +465,10 @@ textarea { width: 100%; resize: vertical; }
   font-weight: 760;
 }
 #progName:focus { border-color: var(--accent); outline: 0; }
-.program-header-settings { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.program-header-settings label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-weight: 700; }
+.program-header-settings { margin-left: auto; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 7px 10px; }
+.program-header-settings label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .program-header-settings input { width: 58px; }
+.program-header-settings select { max-width: 145px; }
 .program-badge { border-radius: 999px; background: #e8edf3; color: var(--muted); padding: 5px 10px; font-size: 11px; font-weight: 750; }
 .program-badge.dirty { background: #fff4d6; color: #8a4b00; }
 

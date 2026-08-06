@@ -123,13 +123,15 @@ The dashboard works without a robot or camera. To use hardware, select the robot
 | Live 3D workcell | Robot feedback, tools, parts, bins, points, camera, and validated paths |
 | Robot programming | Joint Move, Linear Move, Home, Pick, Place, Tool, and Wait commands |
 | Jogging and point capture | Joint/TCP jogging, hand guiding, embedded waypoints, and reusable points |
-| AprilTag tracking | Stable identity, XY position, yaw, dimensions, visibility, and tag offsets |
+| AprilTag tracking | Stable identity, XY position, yaw, dimensions, visibility, tag offsets, and approximate support-height selection |
+| Raised surfaces | Named table, platform, and shelf footprints with calibrated top heights and collision clearance |
+| Production cycles | Finite, continuous, object-triggered, and local computer-triggered programs with saved validated cycles |
 | Camera calibration | Guided ChArUco calibration and permanent workspace-tag localization |
 | End effectors | Adaptive gripper and base-mounted Pump 2.0 suction accessory |
 | Motion validation | Firmware IK/FK plus independent host IK/FK and complete-path continuity checks |
 | Simulation | Full-path playback, command highlighting, and step controls before execution |
 | Spatial AI | Optional push-to-talk commands such as “move Part 3 right” or “place it in Bin A” |
-| Offline development | Scene editing, simulation, and 146 automated tests without robot hardware |
+| Offline development | Scene editing, simulation, and 180 automated tests without robot hardware |
 
 Automatic background image classification is intentionally disabled. Physical objects use AprilTags or manually created virtual positions. The project does not require ROS 2.
 
@@ -458,7 +460,7 @@ Tags 0–3 cannot be assigned to parts. An already-bound object tag requires exp
 - Use the printed 30 mm black square exactly.
 - Align it with the object length axis when possible.
 - If it is offset, measure from the object center in object-local coordinates.
-- Enter the object’s real height; monocular tracking does not infer it.
+- Enter the object’s real height. The known tag size estimates which registered support height the object is on; it does not replace the entered object dimensions.
 
 ### Tracking behavior
 
@@ -468,6 +470,17 @@ Tags 0–3 cannot be assigned to parts. An already-bound object tag requires exp
 - A part disappears from the live scene after approximately one second without a valid observation.
 - Its registered definition remains and returns with the same identity when visible again.
 - No OpenAI request is made merely because the camera is running.
+
+### Table, platform, and shelf heights
+
+The main table is registered automatically at `Z = 0`. Use **+** beside **Surfaces** to add a raised platform or shelf:
+
+1. Enter its robot-frame center X/Y and rectangular footprint.
+2. Measure its top height from the main table and enter that height in millimeters.
+3. Keep the default 15 mm tolerance unless measurements show a wider band is necessary.
+4. Ensure overlapping surfaces do not have overlapping height bands.
+
+The camera estimates the tag’s rough 3D height from the known 30 mm square. After three consistent frames, it matches that estimate to one registered surface and uses the surface’s entered height for planning. An unknown or ambiguous height is rejected rather than assigned a coordinate. Transfer paths treat raised surfaces as collision volumes.
 
 ---
 
@@ -693,7 +706,7 @@ Open a saved program from the Programs tree, select **+** to create one, or use 
 - Left: hierarchical command tree
 - Center: live workcell and validated path
 - Right: selected-command settings
-- Header: repeat count, Save, Delete, Close
+- Header: run mode, cycle/trigger settings, Save, Delete, Close
 - Footer: connection, tool, speed override, status, Stop, Validate & Simulate, Run
 
 ### Command palette
@@ -737,7 +750,18 @@ Commands can be:
 - disabled;
 - deleted.
 
-Programs can repeat 1–20 times. All iterations and transitions are expanded and validated before approval.
+### Repeatable production modes
+
+| Mode | Behavior |
+| --- | --- |
+| Finite | Runs the selected number of complete cycles |
+| Until Stop | Repeats until Stop, a fault, or an optional maximum cycle count |
+| When Part Appears | Waits for three stable frames from one registered object tag, runs once, then requires the tag to disappear for one second before rearming |
+| Computer Trigger | Waits for the local dashboard button or local trigger API; duplicate pending triggers are coalesced |
+
+One explicit confirmation arms a production session. Stop, connection loss, stale calibration, stale tags, failed IK, failed collision checks, or failed motion verification disarms it immediately. Failed cycles are never retried automatically.
+
+After **Validate & Simulate** succeeds, the program stores its validated cycle. Fixed programs reuse the saved route, while object-triggered programs can adjust within the configured 15 mm XY and 10° yaw envelope on the same support surface. Complete live preflight still runs before every physical cycle. Editing a program, tool, calibration, bin, point, or support surface marks the saved cycle stale.
 
 ### Embedded and linked waypoints
 
@@ -1160,6 +1184,8 @@ The browser uses a local JSON API served by `web_server.py`.
 | `POST /api/scene/bin` | Create or update a bin |
 | `POST /api/scene/bin/confirm-position` | Mark the real bin position operator-verified |
 | `POST /api/scene/bin/delete` | Delete a bin |
+| `POST /api/scene/support-surface` | Create or update a raised support surface |
+| `POST /api/scene/support-surface/delete` | Delete a raised support surface |
 | `POST /api/scene/point` | Save a taught point |
 | `POST /api/scene/point/delete` | Delete a taught point |
 | `POST /api/scene/end-effector` | Select adaptive or suction tool |
@@ -1176,6 +1202,10 @@ The browser uses a local JSON API served by `web_server.py`.
 | `POST /api/program/plan` | Compile and validate a program |
 | `POST /api/program/release-preview` | Release preview reservations |
 | `POST /api/program/execute` | Execute an already validated plan after confirmation |
+| `GET /api/program/runtime/status` | Read the armed production-session state and cycle count |
+| `POST /api/program/runtime/arm` | Confirm and arm a saved validated production program |
+| `POST /api/program/runtime/trigger` | Submit one coalesced local computer trigger |
+| `POST /api/program/runtime/stop` | Disarm the production session and stop an active cycle |
 | `POST /api/pick/simulate` | Build a pick preview |
 
 ### Robot-control endpoints
@@ -1312,7 +1342,7 @@ The runner creates a disposable Python 3 virtual environment, installs the
 declared dependencies, then compiles the source, runs `git diff --check`, and
 runs the offline suite. It does not access robot or camera hardware.
 
-The current suite contains 146 offline tests.
+The current suite contains 180 offline tests.
 
 ### Test areas
 

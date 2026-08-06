@@ -443,6 +443,7 @@ def _solve_pose_seed(
     tool_id: str = "adaptive_gripper",
     correction_local_m: Optional[Sequence[float]] = None,
     suction_contact_distance_m: float = SUCTION_CONTACT_DISTANCE_M,
+    diagnostics: Optional[dict] = None,
 ) -> Optional[List[float]]:
     """Damped least-squares IK for a full 6-DOF pose. Returns degrees or None."""
     angles = _clamp_to_limits([float(v) for v in seed_deg])
@@ -452,12 +453,20 @@ def _solve_pose_seed(
     best_angles = list(angles)
     stalled = 0
 
+    iterations = 0
     for _ in range(max_iterations):
+        iterations += 1
         error, pos_err, rot_err = _pose_error(
             angles, target, target_rot, tool_id,
             correction_local_m, suction_contact_distance_m,
         )
         if pos_err <= IK_POSITION_TOLERANCE_M and rot_err <= IK_ORIENTATION_TOLERANCE_RAD:
+            if diagnostics is not None:
+                diagnostics.update({
+                    "ok": True, "bestAngles": list(angles),
+                    "positionErrorM": pos_err, "orientationErrorRad": rot_err,
+                    "iterations": iterations,
+                })
             return [round(v, 5) for v in angles]
         metric = pos_err + 0.05 * rot_err
         if metric < best_metric - 1e-6:
@@ -512,7 +521,19 @@ def _solve_pose_seed(
         correction_local_m, suction_contact_distance_m,
     )
     if pos_err <= IK_POSITION_TOLERANCE_M and rot_err <= IK_ORIENTATION_TOLERANCE_RAD:
+        if diagnostics is not None:
+            diagnostics.update({
+                "ok": True, "bestAngles": list(best_angles),
+                "positionErrorM": pos_err, "orientationErrorRad": rot_err,
+                "iterations": iterations,
+            })
         return [round(v, 5) for v in best_angles]
+    if diagnostics is not None:
+        diagnostics.update({
+            "ok": False, "bestAngles": list(best_angles),
+            "positionErrorM": pos_err, "orientationErrorRad": rot_err,
+            "iterations": iterations,
+        })
     return None
 
 
@@ -525,6 +546,7 @@ def solve_pose(
     tool_id: str = "adaptive_gripper",
     correction_local_m: Optional[Sequence[float]] = None,
     suction_contact_distance_m: float = SUCTION_CONTACT_DISTANCE_M,
+    diagnostics: Optional[dict] = None,
 ) -> Optional[List[float]]:
     """Multi-start damped least-squares IK using deterministic, bounded seeds."""
     x, y, z = (float(value) for value in target_pos[:3])
@@ -541,34 +563,93 @@ def solve_pose(
         for j5 in (-90.0, 0.0, 90.0):
             seeds.append([geometric[0], geometric[1], j3, geometric[3], j5, geometric[5]])
     seen = set()
+    best_seed_result: Optional[dict] = None
+    attempts = 0
+
+    def record(result: dict, phase: str) -> None:
+        nonlocal best_seed_result, attempts
+        attempts += 1
+        raw_position_error = result.get("positionErrorM")
+        raw_orientation_error = result.get("orientationErrorRad")
+        position_error = (
+            float(raw_position_error) if raw_position_error is not None else float("inf")
+        )
+        orientation_error = (
+            float(raw_orientation_error) if raw_orientation_error is not None else float("inf")
+        )
+        metric = position_error + 0.05 * orientation_error
+        result["metric"] = metric
+        result["phase"] = phase
+        if best_seed_result is None or metric < float(best_seed_result.get("metric", float("inf"))):
+            best_seed_result = dict(result)
+
+    def finish(solution: Optional[List[float]], phase: str) -> Optional[List[float]]:
+        if diagnostics is not None:
+            diagnostics.update({
+                "ok": solution is not None,
+                "angles": list(solution) if solution is not None else None,
+                "seedsAttempted": attempts,
+                "failurePhase": None if solution is not None else phase,
+                "bestAngles": (best_seed_result or {}).get("bestAngles"),
+                "bestPositionErrorM": (best_seed_result or {}).get("positionErrorM"),
+                "bestOrientationErrorRad": (best_seed_result or {}).get("orientationErrorRad"),
+            })
+        return solution
+
     for seed in seeds:
         key = tuple(round(v, 3) for v in seed)
         if key in seen:
             continue
         seen.add(key)
+        seed_result: dict = {}
         solution = _solve_pose_seed(
             target_pos, target_rot, seed, max_iterations, tool_id,
             correction_local_m, suction_contact_distance_m,
+            diagnostics=seed_result,
         )
+        record(seed_result, "fast")
         if solution is not None:
-            return solution
+            return finish(solution, "fast")
     if not exhaustive:
-        return None
+        return finish(None, "fast")
     # Exhaustive fallback for difficult wrist branches. This runs only after
     # the fast seeds fail; the grid is deliberately coarse and deterministic.
     base = geometric[0]
-    for base_seed in (base, base + 180.0, base - 180.0):
-        for shoulder in (-100.0, -50.0, 0.0, 50.0, 100.0):
-            for elbow in (-120.0, -60.0, 0.0, 60.0, 120.0):
-                for wrist in (-120.0, -60.0, 0.0, 60.0, 120.0):
-                    seed = _clamp_to_limits([base_seed, shoulder, elbow, 0.0, wrist, -45.0])
+    # J1 is geometrically determined by the target bearing. The previous
+    # +/-180-degree variants clamp against the J1 limits and multiply every
+    # unreachable solve by three without exposing a useful physical branch.
+    for shoulder in (-100.0, -50.0, 0.0, 50.0, 100.0):
+        for elbow in (-120.0, -60.0, 0.0, 60.0, 120.0):
+            for wrist in (-120.0, 0.0, 120.0):
+                    seed = _clamp_to_limits([base, shoulder, elbow, 0.0, wrist, -45.0])
+                    seed_result = {}
                     solution = _solve_pose_seed(
                         target_pos, target_rot, seed, max_iterations, tool_id,
                         correction_local_m, suction_contact_distance_m,
+                        diagnostics=seed_result,
                     )
+                    record(seed_result, "exhaustive")
                     if solution is not None:
-                        return solution
-    return None
+                        return finish(solution, "exhaustive")
+    return finish(None, "exhaustive")
+
+
+def solve_pose_diagnostics(
+    target_pos: Sequence[float], target_rot: Mat3, seed_deg: Sequence[float],
+    max_iterations: int = IK_MAX_ITERATIONS, exhaustive: bool = True,
+    tool_id: str = "adaptive_gripper",
+    correction_local_m: Optional[Sequence[float]] = None,
+    suction_contact_distance_m: float = SUCTION_CONTACT_DISTANCE_M,
+) -> dict:
+    result: dict = {}
+    solve_pose(
+        target_pos, target_rot, seed_deg, max_iterations=max_iterations,
+        exhaustive=exhaustive, tool_id=tool_id,
+        correction_local_m=correction_local_m,
+        suction_contact_distance_m=suction_contact_distance_m,
+        diagnostics=result,
+    )
+    return result
 
 
 def grasp_rotation(yaw_deg: float, tilt_deg: float, radial_yaw_rad: float) -> Mat3:

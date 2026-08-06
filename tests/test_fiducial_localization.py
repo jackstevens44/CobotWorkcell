@@ -2,6 +2,7 @@ import math
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -229,6 +230,149 @@ class FiducialLocalizationTests(unittest.TestCase):
             angular_error = (detections[0]["orientationDeg"] - yaw + 180.0) % 360.0 - 180.0
             self.assertAlmostEqual(angular_error, 0.0, places=6)
 
+    def test_known_tag_size_selects_registered_raised_surface_after_three_frames(self):
+        localizer = FiducialLocalizer()
+        matrix = np.asarray([[800.0, 0.0, 400.0], [0.0, 800.0, 300.0], [0.0, 0.0, 1.0]])
+        rotation = np.diag([1.0, -1.0, -1.0])
+        rvec, _ = cv2.Rodrigues(rotation)
+        tvec = np.asarray([[0.0], [0.0], [0.6]])
+        robot_xy = marker_robot_corners({
+            "center": {"x": 0.18, "y": 0.07}, "sizeM": 0.03, "yawDeg": 0,
+        }, 0.03)
+        pixels, _ = cv2.projectPoints(
+            np.column_stack((robot_xy, np.full(4, 0.13))), rvec, tvec, matrix, np.zeros(5)
+        )
+        mapping = {10: {
+            "partId": "raised", "tagSizeM": 0.03,
+            "size": {"x": 0.05, "y": 0.05, "z": 0.03},
+        }}
+        surfaces = [
+            {"id": "surface-table", "name": "Main Table", "center": {"x": 0, "y": 0}, "size": {"x": 0.8, "y": 0.8}, "topZ": 0.0, "entryToleranceM": 0.015, "holdToleranceM": 0.020, "enabled": True},
+            {"id": "platform", "name": "Platform", "center": {"x": 0.18, "y": 0.07}, "size": {"x": 0.20, "y": 0.20}, "topZ": 0.10, "entryToleranceM": 0.015, "holdToleranceM": 0.020, "enabled": True},
+        ]
+        for _ in range(2):
+            self.assertEqual(localizer._tagged_detections(
+                [pixels.reshape(1, 4, 2)], [10], mapping, matrix, rvec, tvec, {}, surfaces,
+            ), [])
+            self.assertEqual(localizer.last_object_tag_rejections[0]["reason"], "support_surface_stabilizing")
+        detections = localizer._tagged_detections(
+            [pixels.reshape(1, 4, 2)], [10], mapping, matrix, rvec, tvec, {}, surfaces,
+        )
+        self.assertEqual(len(detections), 1)
+        detection = detections[0]
+        self.assertEqual(detection["supportSurfaceId"], "platform")
+        self.assertAlmostEqual(detection["position"]["z"], 0.115, places=5)
+        self.assertAlmostEqual(detection["measuredSupportZ"], 0.10, places=4)
+
+    def test_overlapping_height_bands_reject_instead_of_fabricating_surface(self):
+        localizer = FiducialLocalizer()
+        surfaces = [
+            {"id": "a", "center": {"x": 0, "y": 0}, "size": {"x": 1, "y": 1}, "topZ": 0.10, "entryToleranceM": 0.02, "enabled": True},
+            {"id": "b", "center": {"x": 0, "y": 0}, "size": {"x": 1, "y": 1}, "topZ": 0.11, "entryToleranceM": 0.02, "enabled": True},
+        ]
+        surface, reason, _ = localizer._committed_surface("part", 0.105, 0.1, 0.1, surfaces, 1.0)
+        self.assertIsNone(surface)
+        self.assertEqual(reason, "support_surface_ambiguous")
+
+    def test_surface_footprint_uses_position_on_each_canonical_top_plane(self):
+        localizer = FiducialLocalizer()
+        surfaces = [{
+            "id": "platform", "center": {"x": 0.18, "y": 0.0},
+            "size": {"x": 0.26, "y": 0.10}, "topZ": 0.15,
+            "entryToleranceM": 0.015, "enabled": True,
+        }]
+        for index in range(3):
+            surface, reason, _ = localizer._committed_surface(
+                "part", 0.158, 0.34, 0.06, surfaces, 1.0 + index * 0.1,
+                surface_positions={"platform": (0.304, 0.039)},
+            )
+        self.assertEqual(reason, "matched")
+        self.assertEqual(surface["id"], "platform")
+
+    def test_surface_outside_footprint_has_specific_diagnostic(self):
+        localizer = FiducialLocalizer()
+        surfaces = [{
+            "id": "platform", "center": {"x": 0.18, "y": 0.0},
+            "size": {"x": 0.26, "y": 0.10}, "topZ": 0.15,
+            "entryToleranceM": 0.015, "enabled": True,
+        }]
+        surface, reason, _ = localizer._committed_surface(
+            "part", 0.158, 0.35, 0.08, surfaces, 1.0,
+            surface_positions={"platform": (0.35, 0.08)},
+        )
+        self.assertIsNone(surface)
+        self.assertEqual(reason, "support_surface_outside_footprint")
+        diagnostics = localizer.surface_tracks["part"]["surfaceDiagnostics"]
+        self.assertGreater(diagnostics["footprintDistanceM"], 0.0)
+
+    def test_part_footprint_overlap_accepts_small_edge_overhang(self):
+        localizer = FiducialLocalizer()
+        surfaces = [{
+            "id": "platform", "center": {"x": 0.18, "y": 0.0},
+            "size": {"x": 0.26, "y": 0.10}, "topZ": 0.15,
+            "entryToleranceM": 0.015, "enabled": True,
+        }]
+        for index in range(3):
+            surface, reason, _ = localizer._committed_surface(
+                "part", 0.159, 0.330, 0.036, surfaces, 1.0 + index * 0.1,
+                surface_positions={"platform": (0.330, 0.036)},
+                footprint_margin=(0.0254, 0.0127),
+            )
+        self.assertEqual(reason, "matched")
+        self.assertEqual(surface["id"], "platform")
+        diagnostics = localizer.surface_tracks["part"]["surfaceDiagnostics"]
+        self.assertTrue(diagnostics["usedObjectFootprintOverlap"])
+        self.assertAlmostEqual(diagnostics["edgeOverhangM"], 0.020, places=3)
+
+    def test_entry_height_boundary_allows_camera_measurement_guard_band(self):
+        localizer = FiducialLocalizer()
+        surfaces = [{
+            "id": "platform", "center": {"x": 0.18, "y": 0.0},
+            "size": {"x": 0.26, "y": 0.10}, "topZ": 0.15,
+            "entryToleranceM": 0.015, "enabled": True,
+        }]
+        for index in range(3):
+            surface, reason, _ = localizer._committed_surface(
+                "part", 0.166, 0.262, 0.036, surfaces, 1.0 + index * 0.1,
+                surface_positions={"platform": (0.262, 0.036)},
+                footprint_margin=(0.0254, 0.0127),
+            )
+        self.assertEqual(reason, "matched")
+        self.assertEqual(surface["id"], "platform")
+        self.assertAlmostEqual(
+            localizer.surface_tracks["part"]["surfaceDiagnostics"]["entryMeasurementGuardM"],
+            0.0025,
+        )
+
+    def test_entry_height_guard_band_does_not_accept_wrong_surface(self):
+        localizer = FiducialLocalizer()
+        surfaces = [{
+            "id": "platform", "center": {"x": 0.18, "y": 0.0},
+            "size": {"x": 0.26, "y": 0.10}, "topZ": 0.15,
+            "entryToleranceM": 0.015, "enabled": True,
+        }]
+        surface, reason, _ = localizer._committed_surface(
+            "part", 0.168, 0.262, 0.036, surfaces, 1.0,
+            surface_positions={"platform": (0.262, 0.036)},
+            footprint_margin=(0.0254, 0.0127),
+        )
+        self.assertIsNone(surface)
+        self.assertEqual(reason, "support_surface_unknown")
+
+    def test_legacy_support_surface_tolerance_is_normalized_to_documented_minimum(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cell = Workcell(Path(folder))
+            surface = cell.normalized_support_surface({
+                "id": "legacy-platform",
+                "name": "Legacy Platform",
+                "center": {"x": 0.18, "y": 0.0},
+                "size": {"x": 0.26, "y": 0.10},
+                "topZ": 0.15,
+                "entryToleranceM": 0.010,
+                "holdToleranceM": 0.020,
+            })
+        self.assertEqual(surface["entryToleranceM"], 0.015)
+
     def test_physically_wrong_object_tag_size_is_rejected(self):
         localizer = FiducialLocalizer()
         matrix = np.asarray([[800.0, 0.0, 400.0], [0.0, 800.0, 300.0], [0.0, 0.0, 1.0]])
@@ -277,14 +421,87 @@ class FiducialLocalizationTests(unittest.TestCase):
                 self.assertEqual(cell.version, membership_version)
                 cell.ingest_tag_tracks([], timestamp=10.5)
                 self.assertIn(part_id, cell.parts)
-                cell.ingest_tag_tracks([], timestamp=11.1)
+                cell.ingest_tag_tracks([], timestamp=12.0)
+                self.assertIn(part_id, cell.parts)
+                retained = cell.snapshot()["parts"][0]
+                self.assertFalse(retained["poseFresh"])
+                self.assertEqual(retained["trackingState"], "temporarily_lost")
+                self.assertEqual(cell.assistant_snapshot()["parts"], [])
+                cell.ingest_tag_tracks([], timestamp=12.2)
                 self.assertNotIn(part_id, cell.parts)
                 self.assertIn(part_id, cell.registered_parts)
                 hidden = next(item for item in cell.snapshot()["registeredParts"] if item["partId"] == part_id)
                 self.assertFalse(hidden["visible"])
                 self.assertNotIn("position", hidden)
-                cell.ingest_tag_tracks([detection], timestamp=12.0)
+                cell.ingest_tag_tracks([detection], timestamp=16.0)
                 self.assertEqual(cell.parts[part_id]["label"], "Blue Box")
+
+    def test_one_rejected_frame_keeps_recent_pose_fresh_until_age_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cell = Workcell(Path(folder))
+            definition = cell.bind_tagged_part({"tagId": 10, "label": "Platform Box"})["registeredPart"]
+            part_id = definition["partId"]
+            detection = {
+                "id": part_id, "localizationSource": "object_tag",
+                "position": {"x": 0.2, "y": 0.1, "z": 0.025}, "orientationDeg": 0,
+            }
+            cell.ingest_tag_tracks([detection], timestamp=10.0)
+            cell.ingest_tag_tracks(
+                [], timestamp=10.1, valid=True, observed_part_ids=[part_id],
+                rejection_by_part={part_id: {"reason": "support_surface_unknown"}},
+            )
+            self.assertIn(part_id, cell.parts)
+            self.assertEqual(cell.parts[part_id]["trackingState"], "degraded_recent")
+            self.assertEqual(cell.parts[part_id]["lastObservedAt"], 10.1)
+            self.assertTrue(cell.tag_pose_is_fresh(cell.parts[part_id], now=10.1))
+            with patch("workcell.time.time", return_value=10.1):
+                self.assertEqual(len(cell.assistant_snapshot()["parts"]), 1)
+            cell.ingest_tag_tracks(
+                [], timestamp=11.1, valid=True, observed_part_ids=[part_id],
+                rejection_by_part={part_id: {"reason": "support_surface_unknown"}},
+            )
+            self.assertEqual(cell.parts[part_id]["trackingState"], "observed_unlocalized")
+            self.assertFalse(cell.tag_pose_is_fresh(cell.parts[part_id], now=11.1))
+            plan = cell.plan_program([
+                {"type": "pick", "objectId": part_id},
+                {"type": "place", "destinationId": "missing"},
+            ], [0, 0, 0, 0, 0, -45])
+            self.assertFalse(plan["ok"])
+            self.assertIn("visible but localization was rejected", plan["error"])
+            self.assertIn("support_surface_unknown", plan["error"])
+
+    def test_horizontal_size_solver_recovers_noisy_flat_tag_without_false_tilt(self):
+        localizer = FiducialLocalizer()
+        matrix = np.asarray([[800.0, 0.0, 400.0], [0.0, 800.0, 300.0], [0.0, 0.0, 1.0]])
+        rotation = np.diag([1.0, -1.0, -1.0])
+        rvec, _ = cv2.Rodrigues(rotation)
+        tvec = np.asarray([[0.0], [0.0], [0.6]])
+        robot_xy = marker_robot_corners({"center": {"x": 0.18, "y": 0.07}, "sizeM": 0.03}, 0.03)
+        pixels, _ = cv2.projectPoints(np.column_stack((robot_xy, np.full(4, 0.13))), rvec, tvec, matrix, np.zeros(5))
+        noisy = pixels.reshape(4, 2) + np.asarray([[0.5, -0.4], [-0.3, 0.6], [0.4, -0.5], [-0.6, 0.3]])
+        pose, error = localizer._horizontal_tag_pose(noisy, 0.03, matrix, rvec, tvec, maximum_z=0.25)
+        self.assertIsNone(error, pose)
+        self.assertAlmostEqual(pose["z"], 0.13, delta=0.008)
+        self.assertLess(pose["geometry"]["sideVariationRatio"], 0.18)
+
+    def test_camera_localization_updates_preserve_hidden_tracking_defaults(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cell = Workcell(Path(folder))
+            cell.set_camera_config({"localization": {"intervalS": 0.1}})
+            self.assertEqual(cell.camera["localization"]["displayRetentionS"], 2.0)
+            self.assertEqual(cell.camera["localization"]["poseFreshS"], 1.0)
+
+    def test_legacy_five_second_retention_migrates_to_two_seconds(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "workcell.json"
+            path.write_text(json.dumps({
+                "camera": {"localization": {
+                    "enabled": True, "displayRetentionS": 5.0, "poseFreshS": 1.0,
+                }},
+            }))
+            cell = Workcell(Path(folder))
+            self.assertEqual(cell.camera["localization"]["displayRetentionS"], 2.0)
+            self.assertEqual(cell.camera["localization"]["trackingPolicyVersion"], 2)
 
     def test_tag_binding_requires_explicit_reassignment_and_unbinds_to_virtual(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -309,13 +526,19 @@ class FiducialLocalizationTests(unittest.TestCase):
         baseline = np.asarray(first["homography"])
         baseline[0, 2] += 0.02
         calibration["fiducials"]["baselineHomography"] = baseline.tolist()
-        moved = FiducialLocalizer().localize(jpeg, camera, calibration)
+        moved = FiducialLocalizer().localize(
+            jpeg, camera, calibration,
+            registered_parts=[{"partId": "part-10", "tagId": 10, "label": "Test Box"}],
+        )
         self.assertFalse(moved["ok"])
         self.assertEqual(moved["error"], "camera_moved_reaccept_required")
         self.assertEqual(moved["detections"], [])
         self.assertEqual(moved["frameSize"], {"width": 800, "height": 600})
         self.assertIn(10, [tag["tagId"] for tag in moved["visibleTags"]])
-        self.assertNotIn("robotTablePosition", next(tag for tag in moved["visibleTags"] if tag["tagId"] == 10))
+        visible = next(tag for tag in moved["visibleTags"] if tag["tagId"] == 10)
+        self.assertNotIn("robotTablePosition", visible)
+        self.assertEqual(visible["localizationStatus"], "frame_invalid")
+        self.assertEqual(visible["rejectionReason"], "camera_moved_reaccept_required")
 
     def test_tag_tracker_uses_three_frame_median_and_wrapped_yaw(self):
         tracker = TrackStabilizer()
@@ -330,6 +553,37 @@ class FiducialLocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(final["position"]["x"], 0.1000, places=6)
         self.assertLessEqual(final["stabilitySpreadM"], 0.002)
         self.assertLess(abs(abs(final["orientationDeg"]) - 180.0), 2.0)
+
+    def test_tag_tracker_discards_old_height_samples_after_visibility_gap(self):
+        tracker = TrackStabilizer()
+        tracker.update([{
+            "id": "tag-part-10", "trackId": "tag-part-10",
+            "position": {"x": 0.1, "y": 0.2, "z": 0.02},
+            "orientationDeg": 0.0,
+        }], now=1.0)
+        returned = tracker.update([{
+            "id": "tag-part-10", "trackId": "tag-part-10",
+            "position": {"x": 0.1, "y": 0.2, "z": 0.12},
+            "orientationDeg": 0.0,
+        }], now=2.1)[0]
+        self.assertAlmostEqual(returned["position"]["z"], 0.12)
+
+    def test_tag_tracker_deadband_and_two_frame_large_jump_confirmation(self):
+        tracker = TrackStabilizer()
+        base = {"id": "part", "position": {"x": 0.1, "y": 0.1, "z": 0.02}, "orientationDeg": 5.0}
+        first = tracker.update([deepcopy(base)], now=1.0)[0]
+        jitter = deepcopy(base)
+        jitter["position"]["x"] += 0.001
+        jitter["orientationDeg"] = 5.8
+        second = tracker.update([jitter], now=1.1)[0]
+        self.assertAlmostEqual(second["position"]["x"], first["position"]["x"])
+        self.assertAlmostEqual(second["orientationDeg"], first["orientationDeg"])
+        jumped = deepcopy(base)
+        jumped["position"]["x"] = 0.14
+        pending = tracker.update([deepcopy(jumped)], now=1.2)[0]
+        self.assertAlmostEqual(pending["position"]["x"], 0.1)
+        accepted = tracker.update([deepcopy(jumped)], now=1.3)[0]
+        self.assertAlmostEqual(accepted["position"]["x"], 0.14)
 
     def test_nine_point_verification_thresholds(self):
         samples = [

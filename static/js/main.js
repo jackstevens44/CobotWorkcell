@@ -1,13 +1,13 @@
 // Entry point: boot the workcell editor.
 
-import { state, applySceneSnapshot, applyTagTracks, on } from "./store.js?v=36";
+import { state, applySceneSnapshot, applyTagTracks, on } from "./store.js?v=37";
 import { api } from "./api.js?v=28";
-import { initViewport, renderEnvironment } from "./viewport.js?v=48";
+import { initViewport, renderEnvironment } from "./viewport.js?v=50";
 import {
   initUI, renderTree, renderInspector, renderProgramEditor,
   buildJointControls, setTargetInputs, updateAngleReadouts, updateStatus, loadPorts,
-} from "./ui.js?v=53";
-import { initRealtime } from "./realtime.js?v=42";
+} from "./ui.js?v=56";
+import { initRealtime } from "./realtime.js?v=43";
 
 const ANGLE_POLL_INTERVAL_MS = 150;
 const SCENE_POLL_INTERVAL_MS = 4000;
