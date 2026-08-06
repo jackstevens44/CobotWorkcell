@@ -3570,6 +3570,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/scene/bin":
             self.write_json(self.scene.upsert_bin(body))
             return
+        if parsed.path == "/api/scene/bin/tag-binding":
+            self.write_json(self.scene.bind_tagged_bin(body))
+            return
+        if parsed.path == "/api/scene/bin/tag-unbind":
+            self.write_json(self.scene.unbind_tagged_bin(str(body.get("binId") or body.get("id") or "")))
+            return
         if parsed.path == "/api/scene/bin/confirm-position":
             self.write_json(self.scene.confirm_bin_position(str(body.get("binId") or body.get("id") or "")))
             return

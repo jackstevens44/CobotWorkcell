@@ -700,6 +700,7 @@ export function renderEnvironment() {
   }
 
   for (const bin of state.bins) {
+    if (bin.trackingMode === "apriltag" && bin.displayVisible === false) continue;
     const group = makeBinMesh(bin);
     binGroups.set(bin.id, group);
     environmentGroup.add(group);
@@ -740,6 +741,7 @@ function applyBinTransform(bin, instant = false) {
   const scenePosition = robotFrameToScene(display);
   group.position.set(scenePosition.x, display.z * SCENE_METERS_TO_UNITS, scenePosition.z);
   group.rotation.y = -degToRad(Number(bin.orientationDeg || 0));
+  group.visible = bin.trackingMode !== "apriltag" || bin.displayVisible !== false;
 }
 
 function updateEnvironmentTransforms(instant = false) {
@@ -824,7 +826,8 @@ function startObjectDrag(event) {
   const { kind, id } = group.userData;
   setSelection(kind, id);
   const selectedPart = kind === "part" ? findPart(id) : null;
-  if (kind === "point" || selectedPart?.trackingMode === "apriltag") {
+  const selectedBin = kind === "bin" ? findBin(id) : null;
+  if (kind === "point" || selectedPart?.trackingMode === "apriltag" || selectedBin?.trackingMode === "apriltag") {
     // Taught points and camera-authoritative tagged parts can be selected, but
     // dragging them would create a fake pose that immediately snaps back.
     event.preventDefault();

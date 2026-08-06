@@ -25,6 +25,10 @@ let partWizardSelectedTagId = null;
 let partWizardTagTimer = null;
 let partWizardUnits = "in";
 let partWizardLatestTagPayload = null;
+let binTagBinId = null;
+let binTagSelectedTagId = null;
+let binTagTimer = null;
+let binTagLatestPayload = null;
 let pointWizardDraft = null;
 let viewportHome = null;
 let activeJogSessionId = null;
@@ -867,6 +871,100 @@ async function saveBin(bin) {
   }
 }
 
+function selectBinTag(tag) {
+  binTagSelectedTagId = Number(tag.tagId);
+  const owner = tag.bound
+    ? `${tag.bindingKind || "entity"} ${tag.label || tag.entityId || tag.partId || tag.binId}`
+    : "available";
+  $("#binTagResult").textContent = `AprilTag ${tag.tagId} selected (${owner}).`;
+  if (binTagLatestPayload) renderBinTagPicker(binTagLatestPayload);
+}
+
+function renderBinTagPicker(payload) {
+  binTagLatestPayload = payload;
+  const choices = $("#binVisibleTagChoices");
+  const svg = $("#binTagOverlay");
+  choices.innerHTML = "";
+  svg.innerHTML = "";
+  const frame = payload.frameSize || {};
+  if (frame.width && frame.height) svg.setAttribute("viewBox", `0 0 ${frame.width} ${frame.height}`);
+  for (const tag of [...(payload.tags || [])].sort((a, b) => Number(a.tagId) - Number(b.tagId))) {
+    const label = tag.bound
+      ? `${tag.bindingKind === "bin" ? "Bin-bound" : "Part-bound"}: ${tag.label || tag.entityId || tag.partId || tag.binId}`
+      : "Available";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "visible-tag-choice";
+    button.classList.toggle("bound", Boolean(tag.bound));
+    button.classList.toggle("selected", Number(tag.tagId) === Number(binTagSelectedTagId));
+    button.textContent = `AprilTag ${tag.tagId} — ${label}`;
+    button.addEventListener("pointerdown", (event) => { event.preventDefault(); selectBinTag(tag); });
+    choices.append(button);
+    if (frame.width && frame.height) {
+      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      polygon.setAttribute("points", (tag.cornersPx || []).map((p) => `${p[0]},${p[1]}`).join(" "));
+      polygon.classList.toggle("bound", Boolean(tag.bound));
+      polygon.classList.toggle("localized", tag.localizationStatus === "localized");
+      polygon.classList.toggle("stabilizing", tag.localizationStatus === "stabilizing");
+      polygon.classList.toggle("rejected", ["rejected", "frame_invalid"].includes(tag.localizationStatus));
+      polygon.classList.toggle("selected", Number(tag.tagId) === Number(binTagSelectedTagId));
+      polygon.addEventListener("pointerdown", (event) => { event.preventDefault(); selectBinTag(tag); });
+      svg.append(polygon);
+    }
+  }
+  if (!(payload.tags || []).length) choices.innerHTML = `<span class="helper-text">${payload.ok ? "No tags 10–25 are visible." : `Tag view unavailable: ${payload.error || "invalid frame"}`}</span>`;
+}
+
+async function refreshBinTagPicker() {
+  if (!$("#binTagDialog")?.open) return;
+  try {
+    renderBinTagPicker(await api("/api/camera/tags/visible"));
+    $("#binTagCamera").src = `/api/camera/debug-frame?t=${Date.now()}`;
+  } catch (error) { $("#binTagResult").textContent = `Tag picker unavailable: ${error.message}`; }
+}
+
+async function openBinTagPicker(bin) {
+  const definition = state.registeredBins.find((item) => item.binId === bin.id);
+  binTagBinId = bin.id;
+  binTagSelectedTagId = definition?.tagId ?? null;
+  $("#binTagTitle").textContent = `${definition ? "Change" : "Attach"} AprilTag — ${bin.label}`;
+  $("#binTagOffsetX").value = Math.round(Number(definition?.tagOffsetM?.x || 0) * 1000);
+  $("#binTagOffsetY").value = Math.round(Number(definition?.tagOffsetM?.y || 0) * 1000);
+  $("#binTagMountHeight").value = Math.round(Number(definition?.mountHeightM ?? bin.outer.z) * 1000);
+  $("#binTagYaw").value = Number(definition?.yawOffsetDeg || 0);
+  $("#binTagResult").textContent = definition ? `Currently assigned to tag ${definition.tagId}.` : "Click a visible tag to assign it.";
+  $("#binTagDialog").showModal();
+  try { await post("/api/camera/start", {}); } catch { /* picker reports camera state */ }
+  clearInterval(binTagTimer);
+  binTagTimer = setInterval(refreshBinTagPicker, 150);
+  refreshBinTagPicker();
+}
+
+function closeBinTagPicker() {
+  clearInterval(binTagTimer);
+  binTagTimer = null;
+  $("#binTagCamera").removeAttribute("src");
+  $("#binTagDialog").close();
+}
+
+async function saveBinTagPicker() {
+  if (!binTagSelectedTagId) throw new Error("Click an AprilTag ID 10–25 first.");
+  const request = {
+    binId: binTagBinId, tagId: binTagSelectedTagId,
+    tagOffsetM: { x: Number($("#binTagOffsetX").value || 0) / 1000, y: Number($("#binTagOffsetY").value || 0) / 1000 },
+    mountHeightM: Number($("#binTagMountHeight").value || 0) / 1000,
+    yawOffsetDeg: Number($("#binTagYaw").value || 0),
+  };
+  let payload = await post("/api/scene/bin/tag-binding", request);
+  if (payload.requiresReassign) {
+    if (!window.confirm(`${payload.error} Reassign it to this bin?`)) return;
+    payload = await post("/api/scene/bin/tag-binding", { ...request, reassign: true });
+  }
+  if (payload.ok === false) throw new Error(payload.error || "Bin tag binding was rejected.");
+  applySceneSnapshot(payload);
+  closeBinTagPicker();
+}
+
 function openPointWizard() {
   pointWizardDraft = null;
   $("#pointWizardName").value = `Point ${state.taughtPoints.length + 1}`;
@@ -1071,28 +1169,37 @@ function renderBinInspector(container, bin) {
     bin.positionStatus = "simulation_only";
     bin.positionSource = "dashboard_edit";
   };
-  positionGrid.append(
-    numberField("X", bin.position.x, 0.005, "position.x", (v) => { markSimulated(); bin.position.x = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
-    numberField("Y", bin.position.y, 0.005, "position.y", (v) => { markSimulated(); bin.position.y = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
-    numberField("Z", bin.position.z, 0.005, "position.z", (v) => { markSimulated(); bin.position.z = clamp(v, 0, 0.2); saveBin(bin); }),
-  );
-  position.body.append(positionGrid);
-  const verification = document.createElement("div");
-  verification.className = bin.positionStatus === "operator_verified" ? "success-callout" : "tag-pose-warning";
-  verification.textContent = bin.positionStatus === "operator_verified"
-    ? "Physical position confirmed."
-    : "Simulation only: move the real bin to this location before physical use.";
-  position.body.append(verification);
-  if (bin.positionStatus !== "operator_verified") {
-    const confirm = document.createElement("button");
-    confirm.type = "button";
-    confirm.textContent = "I Moved the Real Bin Here";
-    confirm.addEventListener("click", async () => {
-      applySceneSnapshot(await post("/api/scene/bin/confirm-position", { binId: bin.id }));
-      renderInspector();
-      updateStatus(`Confirmed ${bin.label}'s physical position.`);
-    });
-    position.body.append(confirm);
+  if (bin.trackingMode === "apriltag") {
+    const tracked = document.createElement("div");
+    tracked.className = bin.poseFresh ? "success-callout" : "tag-pose-warning";
+    tracked.textContent = bin.poseFresh
+      ? `AprilTag ${bin.tagId} is providing a fresh physical position and rotation.`
+      : `AprilTag ${bin.tagId} is ${String(bin.trackingState || "not visible").replaceAll("_", " ")}; physical use is blocked.`;
+    position.body.append(tracked);
+  } else {
+    positionGrid.append(
+      numberField("X", bin.position.x, 0.005, "position.x", (v) => { markSimulated(); bin.position.x = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
+      numberField("Y", bin.position.y, 0.005, "position.y", (v) => { markSimulated(); bin.position.y = clamp(v, -SCENE_BOUND_METERS, SCENE_BOUND_METERS); saveBin(bin); }),
+      numberField("Z", bin.position.z, 0.005, "position.z", (v) => { markSimulated(); bin.position.z = clamp(v, 0, 0.2); saveBin(bin); }),
+    );
+    position.body.append(positionGrid);
+    const verification = document.createElement("div");
+    verification.className = bin.positionStatus === "operator_verified" ? "success-callout" : "tag-pose-warning";
+    verification.textContent = bin.positionStatus === "operator_verified"
+      ? "Physical position confirmed."
+      : "Simulation only: move the real bin to this location before physical use.";
+    position.body.append(verification);
+    if (bin.positionStatus !== "operator_verified") {
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.textContent = "I Moved the Real Bin Here";
+      confirm.addEventListener("click", async () => {
+        applySceneSnapshot(await post("/api/scene/bin/confirm-position", { binId: bin.id }));
+        renderInspector();
+        updateStatus(`Confirmed ${bin.label}'s physical position.`);
+      });
+      position.body.append(confirm);
+    }
   }
   container.append(position.details);
 
@@ -1110,9 +1217,9 @@ function renderBinInspector(container, bin) {
   const appearance = section("Appearance");
   appearance.body.append(
     textField("Name", bin.label, (value) => { bin.label = value.trim() || bin.id; saveBin(bin); }),
-    numberField("Rotation", bin.orientationDeg, 1, "orientationDeg", (v) => { markSimulated(); bin.orientationDeg = clamp(v, -180, 180); saveBin(bin); }),
     colorField("Color", bin.color, "#f59e0b", (value) => { bin.color = value; saveBin(bin); }),
   );
+  if (bin.trackingMode !== "apriltag") appearance.body.append(numberField("Rotation", bin.orientationDeg, 1, "orientationDeg", (v) => { markSimulated(); bin.orientationDeg = clamp(v, -180, 180); saveBin(bin); }));
   container.append(appearance.details);
 
   const advanced = section("Advanced", false);
@@ -1130,6 +1237,22 @@ function renderBinInspector(container, bin) {
   meta.textContent = `id: ${bin.id}`;
   advanced.body.append(meta);
   container.append(advanced.details);
+
+  const tagButton = document.createElement("button");
+  tagButton.type = "button";
+  tagButton.textContent = bin.trackingMode === "apriltag" ? "Change AprilTag" : "Attach AprilTag";
+  tagButton.addEventListener("click", () => openBinTagPicker(bin));
+  container.append(tagButton);
+  if (bin.trackingMode === "apriltag") {
+    const unbind = document.createElement("button");
+    unbind.type = "button";
+    unbind.textContent = "Unbind AprilTag";
+    unbind.addEventListener("click", async () => {
+      applySceneSnapshot(await post("/api/scene/bin/tag-unbind", { binId: bin.id }));
+      renderInspector();
+    });
+    container.append(unbind);
+  }
 
   const del = document.createElement("button");
   del.type = "button";
@@ -2322,6 +2445,13 @@ export function initUI() {
     event.preventDefault();
     try { await savePartWizard(); }
     catch (error) { $("#partWizardResult").textContent = error.message; }
+  });
+  $("#binTagCloseBtn").addEventListener("click", closeBinTagPicker);
+  $("#binTagCancelBtn").addEventListener("click", closeBinTagPicker);
+  $("#binTagForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try { await saveBinTagPicker(); }
+    catch (error) { $("#binTagResult").textContent = error.message; }
   });
 
   $("#addBinBtn").addEventListener("click", async () => {
