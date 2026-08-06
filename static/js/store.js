@@ -22,6 +22,8 @@ export const state = {
   registeredParts: [],
   tagTrackRevision: 0,
   bins: [],
+  supportSurfaces: [],
+  supportSurfaceRevision: null,
   taughtPoints: [],
   workspaceRegions: null,
   programs: [],
@@ -42,6 +44,8 @@ export const state = {
   draftSteps: [],
   draftName: "Program 1",
   draftRepeatCount: 1,
+  draftRunPolicy: { mode: "finite", cycleCount: 1, maxCycles: null, triggerPartId: null, stableFrames: 3, rearmAbsentMs: 1000, cooldownMs: 500, xyEnvelopeM: 0.015, yawEnvelopeDeg: 10, expectedSurfaceId: null },
+  productionRuntime: { state: "disarmed", cycleCount: 0 },
   selectedProgramStepId: null,
   programInsertIndex: 0,
   programDirty: false,
@@ -94,6 +98,8 @@ export function applySceneSnapshot(payload) {
   state.registeredParts = payload.registeredParts || state.registeredParts || [];
   state.tagTrackRevision = payload.tagTrackRevision ?? state.tagTrackRevision;
   state.bins = payload.bins || [];
+  state.supportSurfaces = payload.supportSurfaces || state.supportSurfaces || [];
+  state.supportSurfaceRevision = payload.supportSurfaceRevision || state.supportSurfaceRevision;
   state.taughtPoints = payload.taughtPoints || [];
   state.workspaceRegions = payload.workspaceRegions || null;
   state.programs = payload.programs || [];

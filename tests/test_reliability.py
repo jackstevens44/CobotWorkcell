@@ -68,7 +68,7 @@ class PersistenceRecoveryTests(unittest.TestCase):
                 [0.0] * 6,
             )
             self.assertFalse(result["ok"])
-            self.assertIn("AprilTag is not currently visible", result["error"])
+            self.assertIn("has not produced a valid pose", result["error"])
             self.assertNotIn("Visible Other", result["error"])
 
 

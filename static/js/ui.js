@@ -1,12 +1,12 @@
 // Cell browser tree, properties inspector, and program editor.
 
-import { state, on, emit, setSelection, applySceneSnapshot, findPart, findBin, findPoint, clamp } from "./store.js?v=36";
+import { state, on, emit, setSelection, applySceneSnapshot, findPart, findBin, findPoint, clamp } from "./store.js?v=37";
 import { api, post } from "./api.js?v=28";
 import {
   startSimulation, clearSimulation, renderPlanPath, renderEnvironment,
   syncEndEffector, SCENE_BOUND_METERS, pauseSimulation, resumeSimulation,
   seekSimulationSource,
-} from "./viewport.js?v=48";
+} from "./viewport.js?v=50";
 
 const $ = (sel) => document.querySelector(sel);
 const HOME_ANGLES = [0, 0, 0, 0, 0, -45];
@@ -456,6 +456,19 @@ export function renderTree() {
   }
   if (!state.bins.length) binList.innerHTML = '<div class="tree-empty">No bins yet</div>';
 
+  const surfaceList = $("#surfaceList");
+  surfaceList.innerHTML = "";
+  for (const surface of state.supportSurfaces) {
+    surfaceList.append(treeItem(
+      surface.name,
+      surface.id === "surface-table" ? "0 mm · fixed" : `${Math.round(Number(surface.topZ || 0) * 1000)} mm`,
+      false,
+      () => openSupportSurfaceDialog(surface),
+      surface.color,
+    ));
+  }
+  if (!state.supportSurfaces.length) surfaceList.innerHTML = '<div class="tree-empty">Main table only</div>';
+
   const pointList = $("#pointList");
   pointList.innerHTML = "";
   for (const point of state.taughtPoints) {
@@ -482,6 +495,43 @@ export function renderTree() {
     ));
   }
   if (!state.programs.length) programList.innerHTML = '<div class="tree-empty">No programs yet</div>';
+}
+
+function openSupportSurfaceDialog(surface = null) {
+  const locked = surface?.id === "surface-table";
+  $("#supportSurfaceId").value = surface?.id || "";
+  $("#supportSurfaceName").value = surface?.name || "Platform";
+  $("#supportSurfaceX").value = Math.round(Number(surface?.center?.x ?? 0.18) * 1000);
+  $("#supportSurfaceY").value = Math.round(Number(surface?.center?.y ?? 0) * 1000);
+  $("#supportSurfaceSizeX").value = Math.round(Number(surface?.size?.x ?? 0.20) * 1000);
+  $("#supportSurfaceSizeY").value = Math.round(Number(surface?.size?.y ?? 0.20) * 1000);
+  $("#supportSurfaceTopZ").value = Math.round(Number(surface?.topZ ?? 0.05) * 1000);
+  $("#supportSurfaceTolerance").value = Math.round(Number(surface?.entryToleranceM ?? 0.015) * 1000);
+  $("#supportSurfaceEnabled").checked = surface?.enabled !== false;
+  $("#supportSurfaceForm").querySelectorAll("input").forEach((input) => { input.disabled = locked && input.id !== "supportSurfaceId"; });
+  $("#deleteSupportSurfaceBtn").hidden = !surface || locked;
+  $("#supportSurfaceForm").querySelector('button[type="submit"]').hidden = locked;
+  $("#supportSurfaceDialog").showModal();
+}
+
+async function saveSupportSurface(event) {
+  event.preventDefault();
+  const tolerance = clamp(Number($("#supportSurfaceTolerance").value) / 1000, 0.015, 0.05);
+  const payload = await post("/api/scene/support-surface", {
+    id: $("#supportSurfaceId").value || undefined,
+    name: $("#supportSurfaceName").value.trim() || "Platform",
+    center: { x: Number($("#supportSurfaceX").value) / 1000, y: Number($("#supportSurfaceY").value) / 1000 },
+    size: { x: Number($("#supportSurfaceSizeX").value) / 1000, y: Number($("#supportSurfaceSizeY").value) / 1000 },
+    topZ: Number($("#supportSurfaceTopZ").value) / 1000,
+    entryToleranceM: tolerance,
+    holdToleranceM: Math.max(tolerance, 0.020),
+    enabled: $("#supportSurfaceEnabled").checked,
+  });
+  if (!payload.ok) throw new Error(payload.error || "Surface could not be saved.");
+  applySceneSnapshot(payload);
+  $("#supportSurfaceDialog").close();
+  renderTree();
+  updateStatus(`Saved ${payload.supportSurface?.name || "support surface"}.`);
 }
 
 // -------------------------------------------------------------- inspector
@@ -598,7 +648,15 @@ function renderPartTagChoices(payload) {
     name.textContent = `AprilTag ${tag.tagId}`;
     const stateText = document.createElement("span");
     stateText.className = "tag-binding-state";
-    stateText.textContent = tag.bound ? `Assigned to ${tag.label || tag.partId}` : "Available";
+    const status = tag.localizationStatus;
+    const progress = tag.stabilizationProgress || {};
+    stateText.textContent = tag.bound
+      ? status === "stabilizing"
+        ? `Assigned; collecting ${progress.frames || 0}/${progress.required || 3} surface frames`
+        : status === "rejected"
+          ? `Assigned; ${friendlyTagLocalizationMessage(tag)}`
+          : `Assigned to ${tag.label || tag.partId}`
+      : "Available";
     button.append(name, stateText);
     // Selection happens on pointer-down so fast overlay refreshes cannot
     // replace the button between mouse-down and click.
@@ -609,6 +667,28 @@ function renderPartTagChoices(payload) {
     button.addEventListener("click", () => selectPartWizardTag(tag));
     choices.append(button);
   }
+}
+
+function friendlyTagLocalizationMessage(tag) {
+  const reason = tag.rejectionReason || tag.reason || "pose unavailable";
+  const residualMm = Number(tag.nearestSurfaceResidualM) * 1000;
+  if (reason === "support_surface_stabilizing") {
+    const progress = tag.stabilizationProgress || {};
+    return `Tag ${tag.tagId} detected; collecting ${progress.frames || 0}/${progress.required || 3} platform frames.`;
+  }
+  if (reason === "support_surface_ambiguous") return `Tag ${tag.tagId} matches multiple surfaces; adjust their heights or footprints.`;
+  if (reason === "support_surface_outside_footprint") {
+    const distanceMm = Number(tag.surfaceFootprintDistanceM) * 1000;
+    return Number.isFinite(distanceMm)
+      ? `Tag ${tag.tagId} matches the surface height but is ${distanceMm.toFixed(0)} mm outside its footprint; check the surface center and size.`
+      : `Tag ${tag.tagId} matches a surface height but is outside its footprint; check the surface center and size.`;
+  }
+  if (reason === "support_surface_unknown" && Number.isFinite(residualMm)) {
+    return `Tag ${tag.tagId} is ${residualMm.toFixed(0)} mm from the nearest surface height; check the platform or box height.`;
+  }
+  if (reason === "object_tag_geometry_inconsistent") return `Tag ${tag.tagId} is detected but does not look flat; check glare, wrinkles, and print scale.`;
+  if (reason === "object_tag_size_inconsistent" || reason === "object_tag_scale_inconsistent") return `Tag ${tag.tagId} size does not match 30 mm; check print scale.`;
+  return `Tag ${tag.tagId} detected; ${String(reason).replaceAll("_", " ")}.`;
 }
 
 function renderPartTagOverlay(payload) {
@@ -630,6 +710,9 @@ function renderPartTagOverlay(payload) {
     const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
     polygon.setAttribute("points", (tag.cornersPx || []).map((point) => `${point[0]},${point[1]}`).join(" "));
     polygon.classList.toggle("bound", Boolean(tag.bound));
+    polygon.classList.toggle("localized", tag.localizationStatus === "localized");
+    polygon.classList.toggle("stabilizing", tag.localizationStatus === "stabilizing");
+    polygon.classList.toggle("rejected", ["rejected", "frame_invalid"].includes(tag.localizationStatus));
     polygon.classList.toggle("selected", Number(tag.tagId) === Number(partWizardSelectedTagId));
     polygon.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -652,6 +735,11 @@ function renderPartTagOverlay(payload) {
       $("#partTagSelectionStatus").textContent = "Camera moved. Show an object tag ID 10–25 to select it, then relock for coordinates.";
     } else {
       $("#partTagSelectionStatus").textContent = `Coordinates unavailable: ${payload.error || "camera frame invalid"}`;
+    }
+  } else {
+    const selected = (payload.tags || []).find((tag) => Number(tag.tagId) === Number(partWizardSelectedTagId));
+    if (selected?.bound && selected.localizationStatus !== "localized") {
+      $("#partTagSelectionStatus").textContent = friendlyTagLocalizationMessage(selected);
     }
   }
 }
@@ -1208,6 +1296,22 @@ function cloneValue(value) {
   return globalThis.structuredClone ? structuredClone(value) : JSON.parse(JSON.stringify(value));
 }
 
+function runPolicyFor(program = {}) {
+  const policy = program.runPolicy || {};
+  return {
+    mode: policy.mode || "finite",
+    cycleCount: Number(policy.cycleCount || program.repeatCount || 1),
+    maxCycles: policy.maxCycles == null ? null : Number(policy.maxCycles),
+    triggerPartId: policy.triggerPartId || null,
+    stableFrames: Number(policy.stableFrames || 3),
+    rearmAbsentMs: Number(policy.rearmAbsentMs || 1000),
+    cooldownMs: Number(policy.cooldownMs ?? 500),
+    xyEnvelopeM: Number(policy.xyEnvelopeM || 0.015),
+    yawEnvelopeDeg: Number(policy.yawEnvelopeDeg || 10),
+    expectedSurfaceId: policy.expectedSurfaceId || null,
+  };
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -1245,11 +1349,13 @@ function promptUnsavedProgram() {
 }
 
 async function saveProgram() {
+  state.draftRunPolicy.cycleCount = Number(state.draftRepeatCount || 1);
   const payload = await post("/api/programs/save", {
     id: state.activeProgramId || undefined,
     name: state.draftName,
     editorVersion: 2,
     repeatCount: state.draftRepeatCount,
+    runPolicy: state.draftRunPolicy,
     steps: state.draftSteps,
   });
   if (!payload.ok && payload.error) throw new Error(payload.error);
@@ -1258,6 +1364,7 @@ async function saveProgram() {
     state.activeProgramId = payload.program.id;
     state.draftSteps = payload.program.steps.map(cloneValue);
     state.draftRepeatCount = Number(payload.program.repeatCount || 1);
+    state.draftRunPolicy = runPolicyFor(payload.program);
   }
   state.programDirty = false;
   renderTree();
@@ -1285,6 +1392,7 @@ async function deleteProgram(programId) {
       state.activeProgramId = null;
       state.draftName = `Program ${state.programs.length + 1}`;
       state.draftRepeatCount = 1;
+      state.draftRunPolicy = runPolicyFor({ repeatCount: 1 });
       state.draftSteps = [];
       state.selectedProgramStepId = null;
       state.programDirty = false;
@@ -1316,10 +1424,12 @@ export async function closeProgramWorkspace({ force = false } = {}) {
       if (saved) {
         state.draftName = saved.name;
         state.draftRepeatCount = Number(saved.repeatCount || 1);
+        state.draftRunPolicy = runPolicyFor(saved);
         state.draftSteps = saved.steps.map(cloneValue);
       } else {
         state.draftSteps = [];
         state.draftRepeatCount = 1;
+        state.draftRunPolicy = runPolicyFor({ repeatCount: 1 });
       }
       state.selectedProgramStepId = state.draftSteps[0]?.id || null;
       state.programDirty = false;
@@ -1361,11 +1471,17 @@ async function loadProgram(programId) {
   state.activeProgramId = program.id;
   state.draftName = program.name;
   state.draftRepeatCount = Number(program.repeatCount || 1);
+  state.draftRunPolicy = runPolicyFor(program);
   state.draftSteps = program.steps.map(cloneValue);
+  const cachedPlan = ["cached", "validated"].includes(program.compiledCycle?.status)
+    ? program.compiledCycle?.planTemplate
+    : null;
+  state.lastPlan = cachedPlan ? cloneValue(cachedPlan) : null;
   state.selectedProgramStepId = state.draftSteps[0]?.id || null;
   state.programDirty = false;
   renderTree();
   renderProgramEditor();
+  if (state.lastPlan?.ok) renderPlanPath(state.lastPlan);
   openProgramWorkspace();
 }
 
@@ -1430,6 +1546,9 @@ function stepProblem(step, index = 0) {
 
 function draftProgramProblem() {
   if (!state.draftSteps.length) return "Add steps to the program first.";
+  if (state.draftRunPolicy.mode === "object_triggered" && !state.draftRunPolicy.triggerPartId) {
+    return "Select the registered AprilTag part that starts each cycle.";
+  }
   let holding = null;
   for (let index = 0; index < state.draftSteps.length; index += 1) {
     const step = state.draftSteps[index];
@@ -1651,6 +1770,24 @@ export function renderProgramEditor() {
   if (!nameInput) return;
   if (document.activeElement !== nameInput) nameInput.value = state.draftName;
   $("#programRepeatCount").value = String(state.draftRepeatCount || 1);
+  $("#programRunMode").value = state.draftRunPolicy.mode || "finite";
+  $("#programMaxCycles").value = state.draftRunPolicy.maxCycles == null ? "" : String(state.draftRunPolicy.maxCycles);
+  const triggerSelect = $("#programTriggerPart");
+  triggerSelect.innerHTML = '<option value="">Select registered part</option>';
+  for (const definition of state.registeredParts) {
+    const option = document.createElement("option");
+    option.value = definition.partId;
+    option.textContent = `${definition.label} · tag ${definition.tagId}`;
+    option.selected = definition.partId === state.draftRunPolicy.triggerPartId;
+    triggerSelect.append(option);
+  }
+  $("#programCycleCountField").hidden = state.draftRunPolicy.mode !== "finite";
+  $("#programMaxCyclesField").hidden = state.draftRunPolicy.mode === "finite";
+  $("#programTriggerPartField").hidden = state.draftRunPolicy.mode !== "object_triggered";
+  $("#programEnvelopeField").hidden = state.draftRunPolicy.mode !== "object_triggered";
+  $("#programXyEnvelope").value = String(Math.round(Number(state.draftRunPolicy.xyEnvelopeM || 0.015) * 1000));
+  $("#programYawEnvelope").value = String(Number(state.draftRunPolicy.yawEnvelopeDeg || 10));
+  $("#triggerCycleBtn").hidden = state.draftRunPolicy.mode !== "external_triggered";
   $("#programDirtyBadge").textContent = state.programDirty ? "Unsaved" : "Saved";
   $("#programDirtyBadge").classList.toggle("dirty", state.programDirty);
   $("#programConnectionState").textContent = state.executing ? "Running" : state.connected ? "Online" : "Offline";
@@ -1696,19 +1833,27 @@ export function renderProgramEditor() {
   renderSelectedStepInspector();
   const blocker = physicalRunBlocker();
   const runButton = $("#runBtn");
-  const running = Boolean(state.physicalRunActive || state.executing);
+  const runtimeState = state.productionRuntime?.state || "disarmed";
+  const productionActive = !["disarmed", "completed", "faulted"].includes(runtimeState);
+  const running = Boolean(state.physicalRunActive || state.executing || productionActive);
   runButton.disabled = running;
   if (running) {
-    runButton.textContent = "Running";
-    $("#runStatus").textContent = state.executionSourceStepId
-      ? `Running ${stepLabel(state.draftSteps.find((step) => step.id === state.executionSourceStepId) || {})}.`
-      : "Physical program is running.";
+    runButton.textContent = productionActive ? "Armed" : "Running";
+    $("#runStatus").textContent = productionActive
+      ? `${runtimeState.replaceAll("_", " ")} · cycle ${Number(state.productionRuntime.cycleCount || 0)}${state.productionRuntime.maxCycles ? ` / ${state.productionRuntime.maxCycles}` : ""}`
+      : state.executionSourceStepId
+        ? `Running ${stepLabel(state.draftSteps.find((step) => step.id === state.executionSourceStepId) || {})}.`
+        : "Physical program is running.";
   } else if (blocker) {
     runButton.textContent = state.lastPlan?.ok ? "Blocked — View Issue" : "Validate & Simulate First";
     $("#runStatus").textContent = blocker;
   } else {
-    runButton.textContent = "Run Complete Program";
-    $("#runStatus").textContent = "Validated complete program is ready.";
+    runButton.textContent = state.draftRunPolicy.mode === "finite" ? "Run Complete Program" : "Arm Program";
+    const active = state.programs.find((program) => program.id === state.activeProgramId);
+    const cache = active?.compiledCycle;
+    $("#runStatus").textContent = cache?.status === "cached"
+      ? "Cached cycle is validated and ready."
+      : "Validated complete program is ready.";
   }
 }
 
@@ -1882,7 +2027,11 @@ function selectSimulationCommand(offset) {
 }
 
 function planSummary(plan) {
-  if (!plan?.ok) return plan?.error || "Plan failed.";
+  const timing = plan?.planningDiagnostics || {};
+  const timingLine = Number.isFinite(Number(timing.totalMs))
+    ? `Planning: ${(Number(timing.totalMs) / 1000).toFixed(2)}s; slowest phase ${String(timing.slowestPhase || "unknown").replace(/Ms$/, "")}.`
+    : null;
+  if (!plan?.ok) return [plan?.error || "Plan failed.", timingLine].filter(Boolean).join("\n");
   const model = plan.motionModel || {};
   const rpy = model.toolRpySource === "canonical_top_down"
     ? ", per-pick top-down RPY"
@@ -1896,6 +2045,7 @@ function planSummary(plan) {
     `Plan: ${plan.program}  -  ${plan.steps.length} states, est ${(plan.durationMs / 1000).toFixed(1)}s`,
     `Motion: ${model.type || plan.mode || "coordinate"} (${model.toolRpySource || "runtime_current"}${rpy}${preview})`,
   ];
+  if (timingLine) lines.push(timingLine);
   if (plan.requiresCapturedToolRpy) {
     lines.push("NOT READY: capture tool orientation before physical execution.");
   }
@@ -1951,16 +2101,25 @@ async function planAndSimulate() {
     renderProgramEditor();
     return;
   }
-  $("#planOutput").textContent = "Planning...";
+  const planningStarted = performance.now();
+  $("#planOutput").textContent = "Planning… 0.0s";
+  const planningTimer = window.setInterval(() => {
+    const elapsed = (performance.now() - planningStarted) / 1000;
+    $("#planOutput").textContent = `Planning… ${elapsed.toFixed(1)}s`;
+  }, 100);
   try {
+    // A validated production cycle belongs to a persisted program. Save the
+    // operator's current definition first, then let the server atomically
+    // attach the compiled cycle only after full validation succeeds.
+    if (state.programDirty || !state.activeProgramId) await saveProgram();
     const plan = await post("/api/program/plan", {
-      name: state.draftName,
-      steps: state.draftSteps,
-      repeatCount: state.draftRepeatCount,
+      programId: state.activeProgramId,
+      persistCompiledCycle: true,
     });
     state.lastPlan = plan;
     $("#planOutput").textContent = planSummary(plan);
     if (plan.ok) {
+      try { applySceneSnapshot(await api("/api/scene")); } catch { /* cache badge refresh is best-effort */ }
       renderPlanPath(plan);
       const canSimulateCoordinate = plan.mode !== "coordinate_program" || Boolean(plan.coordinatePreview?.ok);
       if (!plan.requiresCapturedToolRpy && canSimulateCoordinate && plan.coordinatePreflight?.ok !== false) {
@@ -1980,6 +2139,8 @@ async function planAndSimulate() {
   } catch (error) {
     state.lastPlan = null;
     $("#planOutput").textContent = `Plan failed: ${error.message}`;
+  } finally {
+    window.clearInterval(planningTimer);
   }
   renderProgramEditor();
 }
@@ -2005,6 +2166,26 @@ async function runPhysical() {
       : "Run this program on the PHYSICAL robot?\nSpeeds are limited; Stop aborts at any waypoint."
   );
   if (!ok) return;
+  if (state.activeProgramId) {
+    try {
+      clearSimulation();
+      const result = await post("/api/program/runtime/arm", {
+        programId: state.activeProgramId,
+        confirm: "RUN_PHYSICAL_PICK",
+        speedOverridePct: clamp($("#programSpeedOverride")?.value || 100, 1, 100),
+      });
+      if (!result.ok) throw new Error(result.error || "Program could not be armed.");
+      state.productionRuntime = result;
+      updateStatus(result.mode === "finite" ? "Program running." : "Production program armed.");
+      renderProgramEditor();
+      return;
+    } catch (error) {
+      $("#planOutput").textContent = `${planSummary(plan)}\n\nArm failed: ${error.message}`;
+      updateStatus(`Arm failed: ${error.message}`);
+      renderProgramEditor();
+      return;
+    }
+  }
   $("#runBtn").disabled = true;
   state.physicalRunActive = true;
   state.executionSourceStepId = null;
@@ -2162,6 +2343,24 @@ export function initUI() {
     }
   });
 
+  $("#addSurfaceBtn").addEventListener("click", () => openSupportSurfaceDialog());
+  $("#cancelSupportSurfaceBtn").addEventListener("click", () => $("#supportSurfaceDialog").close());
+  $("#supportSurfaceForm").addEventListener("submit", async (event) => {
+    try { await saveSupportSurface(event); }
+    catch (error) { event.preventDefault(); updateStatus(`Surface save failed: ${error.message}`); }
+  });
+  $("#deleteSupportSurfaceBtn").addEventListener("click", async () => {
+    const id = $("#supportSurfaceId").value;
+    if (!id || !window.confirm("Delete this support surface? Cached production cycles will require validation again.")) return;
+    try {
+      const payload = await post("/api/scene/support-surface/delete", { id });
+      if (!payload.ok) throw new Error(payload.error || "Surface could not be deleted.");
+      applySceneSnapshot(payload);
+      $("#supportSurfaceDialog").close();
+      renderTree();
+    } catch (error) { updateStatus(`Surface delete failed: ${error.message}`); }
+  });
+
   $("#addPointBtn").addEventListener("click", openPointWizard);
   $("#pointWizardCloseBtn").addEventListener("click", closePointWizard);
   $("#pointWizardCancelBtn").addEventListener("click", closePointWizard);
@@ -2204,6 +2403,7 @@ export function initUI() {
     state.activeProgramId = null;
     state.draftName = `Program ${state.programs.length + 1}`;
     state.draftRepeatCount = 1;
+    state.draftRunPolicy = runPolicyFor({ repeatCount: 1 });
     state.draftSteps = [];
     state.selectedProgramStepId = null;
     state.programDirty = false;
@@ -2227,6 +2427,31 @@ export function initUI() {
   });
   $("#programRepeatCount").addEventListener("change", () => {
     state.draftRepeatCount = clamp($("#programRepeatCount").value, 1, 20);
+    state.draftRunPolicy.cycleCount = state.draftRepeatCount;
+    markProgramChanged();
+  });
+  $("#programRunMode").addEventListener("change", () => {
+    state.draftRunPolicy.mode = $("#programRunMode").value;
+    markProgramChanged();
+  });
+  $("#programMaxCycles").addEventListener("change", () => {
+    const value = $("#programMaxCycles").value;
+    state.draftRunPolicy.maxCycles = value ? clamp(value, 1, 1000000) : null;
+    markProgramChanged();
+  });
+  $("#programTriggerPart").addEventListener("change", () => {
+    const partId = $("#programTriggerPart").value || null;
+    state.draftRunPolicy.triggerPartId = partId;
+    const visible = state.parts.find((part) => part.id === partId);
+    state.draftRunPolicy.expectedSurfaceId = visible?.supportSurfaceId || null;
+    markProgramChanged();
+  });
+  $("#programXyEnvelope").addEventListener("change", () => {
+    state.draftRunPolicy.xyEnvelopeM = clamp($("#programXyEnvelope").value, 1, 50) / 1000;
+    markProgramChanged();
+  });
+  $("#programYawEnvelope").addEventListener("change", () => {
+    state.draftRunPolicy.yawEnvelopeDeg = clamp($("#programYawEnvelope").value, 1, 45);
     markProgramChanged();
   });
   $("#commandPaletteBtn").addEventListener("click", () => {
@@ -2273,11 +2498,29 @@ export function initUI() {
   });
   $("#planBtn").addEventListener("click", planAndSimulate);
   $("#runBtn").addEventListener("click", runPhysical);
+  $("#triggerCycleBtn").addEventListener("click", async () => {
+    try {
+      const result = await post("/api/program/runtime/trigger", {});
+      if (!result.ok) throw new Error(result.error || "Trigger was rejected.");
+      state.productionRuntime = result;
+      renderProgramEditor();
+    } catch (error) { updateStatus(`Trigger failed: ${error.message}`); }
+  });
   $("#programStopBtn").addEventListener("click", async () => {
     await stopJogging();
+    try {
+      state.productionRuntime = await post("/api/program/runtime/stop", {});
+    } catch { /* ordinary Stop below remains authoritative */ }
     try { await post("/api/command/stop", {}); } catch { /* status poll reports link errors */ }
     updateStatus("Stop sent.");
   });
+  setInterval(async () => {
+    if (!state.programWorkspaceOpen) return;
+    try {
+      state.productionRuntime = await api("/api/program/runtime/status");
+      renderProgramEditor();
+    } catch { /* main status polling reports server loss */ }
+  }, 400);
   $("#simPlayBtn").addEventListener("click", () => {
     if (!state.lastPlan?.ok) return;
     if (!state.simulation || state.simulation.done) startSimulation(state.lastPlan);

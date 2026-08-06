@@ -1,9 +1,9 @@
 // OpenAI Realtime (WebRTC) AI assistant panel.
 
 import { api, post } from "./api.js?v=28";
-import { state, applySceneSnapshot } from "./store.js?v=36";
-import { renderProgramEditor, renderTree, updateStatus, openProgramWorkspace } from "./ui.js?v=52";
-import { startSimulation, clearSimulation, renderPlanPath } from "./viewport.js?v=48";
+import { state, applySceneSnapshot } from "./store.js?v=37";
+import { renderProgramEditor, renderTree, updateStatus, openProgramWorkspace } from "./ui.js?v=56";
+import { startSimulation, clearSimulation, renderPlanPath } from "./viewport.js?v=50";
 
 const realtime = {
   pc: null,
@@ -72,6 +72,12 @@ function showPlanInProgramPanel(plan, program = null) {
     state.draftName = program.name || plan.program || "Voice Program";
     state.draftSteps = (program.steps || []).map((step) => ({ ...step }));
     state.draftRepeatCount = Number(program.repeatCount || plan.repeatCount || 1);
+    state.draftRunPolicy = program.runPolicy || {
+      mode: "finite", cycleCount: state.draftRepeatCount, maxCycles: null,
+      triggerPartId: null, stableFrames: 3, rearmAbsentMs: 1000,
+      cooldownMs: 500, xyEnvelopeM: 0.015, yawEnvelopeDeg: 10,
+      expectedSurfaceId: null,
+    };
     state.programDirty = false;
   } else {
     state.activeProgramId = null;
