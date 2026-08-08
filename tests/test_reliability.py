@@ -324,7 +324,7 @@ class FrontendReliabilityTests(unittest.TestCase):
         self.assertIn('selectedPart?.trackingMode === "apriltag"', viewport)
         self.assertIn("registered but its AprilTag is not visible", (root / "static/js/ui.js").read_text())
         self.assertIn("received malformed server data", realtime)
-        self.assertIn('"required": ["pendingRunId", "answer"]', server)
+        self.assertNotIn('"name": "confirm_program_run"', server)
         self.assertIn('"realtimePlanId": {"type": "string"}', server)
         self.assertIn('"name": "run_validated_program"', server)
         self.assertIn('"required": ["realtimePlanId"]', server)

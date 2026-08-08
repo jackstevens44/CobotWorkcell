@@ -327,7 +327,11 @@ class RealtimeConfigurationTests(unittest.TestCase):
         self.assertIn('"turn_detection": None', server)
         self.assertIn("OPENAI_REALTIME_MODEL=gpt-realtime-2.1", example)
         self.assertIn("track.enabled = false", client)
-        self.assertLess(client.index('type: "input_audio_buffer.clear"'), client.index("track.enabled = true"))
+        begin_talk = client.index("function beginTalk")
+        self.assertLess(
+            client.index('type: "input_audio_buffer.clear"', begin_talk),
+            client.index("setMicrophoneEnabled(true)", begin_talk),
+        )
         self.assertLess(client.index('type: "input_audio_buffer.commit"'), client.index("requestResponseCreate();", client.index("function endTalk")))
         self.assertIn("MIN_PUSH_TO_TALK_MS = 200", client)
         self.assertIn("conversationActive: false", client)
