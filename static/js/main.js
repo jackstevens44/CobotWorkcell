@@ -7,7 +7,7 @@ import {
   initUI, renderTree, renderInspector, renderProgramEditor,
   buildJointControls, setTargetInputs, updateAngleReadouts, updateStatus, loadPorts,
 } from "./ui.js?v=56";
-import { initRealtime } from "./realtime.js?v=43";
+import { initRealtime } from "./realtime.js?v=44";
 
 const ANGLE_POLL_INTERVAL_MS = 150;
 const SCENE_POLL_INTERVAL_MS = 4000;

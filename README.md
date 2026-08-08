@@ -132,7 +132,7 @@ The dashboard works without a robot or camera. To use hardware, select the robot
 | End effectors | Adaptive gripper and base-mounted Pump 2.0 suction accessory |
 | Motion validation | Firmware IK/FK plus independent host IK/FK and complete-path continuity checks |
 | Simulation | Full-path playback, command highlighting, and step controls before execution |
-| Spatial AI | Optional push-to-talk commands such as “move Part 3 right” or “place it in Bin A” |
+| Spatial AI | Optional push-to-talk or hands-free commands such as “move Part 3 right” or “place it in Bin A” |
 | Offline development | Scene editing, simulation, and 180 automated tests without robot hardware |
 
 Automatic background image classification is intentionally disabled. Physical objects use AprilTags or manually created virtual positions. The project does not require ROS 2.
@@ -302,7 +302,7 @@ External-camera selection, live frame, calibration wizard, tag visibility, and t
 
 #### AI Assistant tab
 
-OpenAI Realtime connection, push-to-talk, typed commands, assistant status, and results.
+OpenAI Realtime connection, push-to-talk, opt-in hands-free conversation, typed commands, assistant status, and results.
 
 ---
 
@@ -936,11 +936,10 @@ Never commit `api_keys.env` or `.env`.
 
 1. Open the AI Assistant tab.
 2. Select **Connect**.
-3. Hold **Hold to Talk**.
-4. Speak.
-5. Release to send.
+3. Either hold **Hold to Talk**, speak, and release, or select **Start Conversation** for hands-free turns.
+4. Select **End Conversation** when hands-free listening is no longer needed.
 
-The microphone is not an open always-listening channel. Very short presses are ignored to avoid invalid audio commits.
+Push-to-talk remains the default and very short presses are ignored to avoid invalid audio commits. Hands-free listening is opt-in for the current connection and does not resume automatically after a reload or reconnect. The same voice controls remain available when a generated plan opens the full-screen programmer.
 
 ### Example commands
 
@@ -952,7 +951,6 @@ The microphone is not an open always-listening channel. Very short presses are i
 - “Pick Part 3 and place it at Drop Point.”
 - “Plan a home move.”
 - “Run that.”
-- “Yes.”
 - “Stop.”
 
 ### Division of responsibility
@@ -980,7 +978,9 @@ The model may not invent coordinates, hidden-object locations, embedded waypoint
 
 ### Physical confirmation
 
-A voice request to run stages the latest preview and asks one short yes/no question. Only a clear confirmation within the pending-run window may start physical execution.
+After inspecting a fresh validated preview, a direct command such as “run it” or “execute the current plan” is the single explicit confirmation. The assistant must call the physical-run tool with that preview’s exact one-time ID; it does not ask a second “Are you sure?” question. Questions, hypothetical wording, quoted commands, negated commands, expired previews, and reused preview IDs cannot start execution. All live camera, tool, collision, IK, controller, and motion checks still run before movement.
+
+Workspace observations and program creation also require function calls. The assistant cannot truthfully claim that it inspected the scene or created a program from conversation alone; those actions must be returned by the spatial-context and planning tools.
 
 ### Camera classification
 
@@ -1329,7 +1329,7 @@ The browser communicates with the local Python server. The server owns the workc
 | `static/js/store.js` | Shared client state |
 | `static/js/ui.js` | Inspector, wizard, programmer, jogging |
 | `static/js/viewport.js` | Three.js scene, digital twin, paths, simulation |
-| `static/js/realtime.js` | Push-to-talk Realtime assistant |
+| `static/js/realtime.js` | Push-to-talk and opt-in hands-free Realtime assistant |
 | `static/vendor/` | Robot, tool, Three.js, and attributed CAD assets |
 | `data/workcell.json` | Machine-specific persistent workcell |
 | `tests/` | Offline regression suite |
@@ -1379,7 +1379,7 @@ The current suite contains 180 offline tests.
 - embedded and linked waypoints;
 - program deletion and physical-run contracts;
 - joint and TCP jogging safeguards;
-- Realtime tool flow and push-to-talk ordering;
+- Realtime tool flow, one-step run authorization, push-to-talk ordering, and hands-free mode configuration;
 - browser module-state consistency;
 - layout containment and renderer resizing;
 - pump IO sequencing;

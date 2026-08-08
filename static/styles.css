@@ -328,6 +328,8 @@ button.danger.big { padding: 8px 22px; font-size: 14px; font-weight: 800; }
   padding-left: 6px;
   padding-right: 6px;
 }
+.realtime-controls { flex-wrap:wrap; }
+#realtimeConversationBtn { flex-basis:100%; }
 
 #realtimeAudio {
   display: none;
@@ -384,9 +386,13 @@ textarea { width: 100%; resize: vertical; }
 .tag-pose-warning span { font-size:12px; }
 .tag-pose-warning button { flex:none; border-color:#f59e0b; background:#fff; color:#92400e; font-weight:750; }
 
-#realtimeTalkBtn.listening {
+#realtimeTalkBtn.listening,
+#programRealtimeTalkBtn.listening,
+#realtimeConversationBtn.listening,
+#programRealtimeConversationBtn.listening {
   background:#dc2626;
   border-color:#b91c1c;
+  color:#fff;
   box-shadow:0 0 0 4px rgba(220,38,38,.16);
 }
 .tag-picker-stage { position:relative; background:#101827; border-radius:12px; overflow:hidden; aspect-ratio:16/9; }
@@ -569,6 +575,9 @@ textarea { width: 100%; resize: vertical; }
 .program-footer-status { flex: 0 1 390px; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .program-footer-status label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .program-footer-status input { width: 105px; }
+.program-realtime-controls { display:flex; align-items:center; gap:6px; min-width:0; }
+.program-realtime-controls span { max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:10px; }
+.program-realtime-controls button { padding:6px 8px; font-size:10px; white-space:nowrap; }
 .program-run-status {
   contain: inline-size;
   flex: 1 1 0;
@@ -586,10 +595,12 @@ textarea { width: 100%; resize: vertical; }
   .program-workspace-body { grid-template-columns: 220px minmax(360px, 1fr) 260px; }
   .program-footer-status { min-width: 270px; }
   #programToolState { display: none; }
+  .program-realtime-controls span { display:none; }
 }
 @media (max-width: 820px) {
   .program-workspace-body { grid-template-columns: 200px 1fr; }
   .program-inspector-pane { position: absolute; right: 0; top: 64px; bottom: 62px; width: min(330px, 85vw); z-index: 20; box-shadow: -8px 0 28px rgba(15,23,42,.16); }
   .program-footer-status { display: none; }
+  .program-realtime-controls { display:none; }
   .program-workspace-footer { gap: 8px; }
 }
