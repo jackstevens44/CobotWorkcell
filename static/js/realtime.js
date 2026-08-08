@@ -34,6 +34,17 @@ const PLANNING_TOOLS = new Set([
   "plan_pick_place",
   "plan_program",
 ]);
+const TOOL_ACTIVITY = {
+  get_spatial_context: "Reading workspace...",
+  get_robot_status: "Reading robot status...",
+  plan_home_zero: "Creating and validating program...",
+  plan_spatial_move: "Creating and validating program...",
+  plan_move_to_point: "Creating and validating program...",
+  plan_pick_place: "Creating and validating program...",
+  plan_program: "Creating and validating program...",
+  run_validated_program: "Running...",
+  stop_robot: "Stopping...",
+};
 const $ = (sel) => document.querySelector(sel);
 
 function setRealtimeStatus(message) {
@@ -311,8 +322,8 @@ async function runTool(item) {
   let args = {};
   let result;
   try {
+    if (TOOL_ACTIVITY[item.name]) setRealtimeStatus(TOOL_ACTIVITY[item.name]);
     if (PLANNING_TOOLS.has(item.name)) {
-      setRealtimeStatus("Planning and validating the path...");
       const output = $("#planOutput");
       if (output) output.textContent = "AI is calculating a safe destination and validating the complete path...";
     }
