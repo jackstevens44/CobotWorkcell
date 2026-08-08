@@ -107,6 +107,82 @@ class TaggedBinRegistryTests(unittest.TestCase):
         context = self.cell.spatial_context()
         self.assertTrue(any(item["id"] == "bin-a" for item in context["entities"]))
 
+    def test_fresh_tracked_bin_is_physical_not_simulation_only(self):
+        self.bind()
+        now = time.time()
+        self.cell.ingest_tag_tracks([self.detection()], timestamp=now)
+        bin_obj = self.cell.bins["bin-a"]
+        self.assertEqual(bin_obj["positionStatus"], "tag_tracked")
+        self.assertTrue(self.cell._bin_position_is_physically_usable_locked(bin_obj))
+        warnings = self.cell.spatial_context()["availabilityWarnings"]
+        self.assertFalse(any(
+            item.get("entityId") == "bin-a" and item.get("code") == "simulation_only"
+            for item in warnings
+        ))
+
+        # A stale browser payload must not overwrite the server's live tag authority.
+        self.cell.upsert_bin({
+            **bin_obj,
+            "label": "Bin A renamed",
+            "positionStatus": "simulation_only",
+            "positionSource": "dashboard_edit",
+        })
+        updated = self.cell.bins["bin-a"]
+        self.assertEqual(updated["positionStatus"], "tag_tracked")
+        self.assertEqual(updated["positionSource"], "camera")
+
+    def test_bin_freshness_wait_and_diagnostic_use_observed_tag_state(self):
+        self.bind()
+        now = time.time()
+        self.cell.ingest_tag_tracks(
+            [], timestamp=now, observed_bin_ids=["bin-a"],
+            rejection_by_bin={"bin-a": {
+                "reason": "support_surface_stabilizing",
+                "stabilizationProgress": {"frames": 2, "required": 3},
+            }},
+        )
+        message = self.cell.bin_pose_unavailable_error("bin-a")
+        self.assertIn("Tag 11 was detected", message)
+        self.assertIn("2/3 frames", message)
+
+        original_sleep = time.sleep
+        def accept_during_wait(_seconds):
+            self.cell.ingest_tag_tracks([self.detection()], timestamp=time.time())
+        try:
+            time.sleep = accept_during_wait
+            self.assertTrue(self.cell.wait_for_bin_pose("bin-a", timeout_s=0.5))
+        finally:
+            time.sleep = original_sleep
+
+    def test_bin_rejection_reports_surface_residual(self):
+        self.bind()
+        self.cell.ingest_tag_tracks(
+            [], timestamp=time.time(), observed_bin_ids=["bin-a"],
+            rejection_by_bin={"bin-a": {
+                "reason": "support_surface_unknown",
+                "nearestSurfaceResidualM": 0.022,
+                "nearestSurfaceId": "surface-table",
+                "measuredTagTopZ": 0.001,
+            }},
+        )
+        message = self.cell.bin_pose_unavailable_error("bin-a")
+        self.assertIn("support_surface_unknown", message)
+        self.assertIn("22.0 mm", message)
+        self.assertIn("Configured tag mounting height is 40.0 mm", message)
+        self.assertIn("tag plane near 1.0 mm above Main Table", message)
+
+    def test_registered_bin_reload_cannot_retain_simulation_only_status(self):
+        self.bind()
+        # Reproduce an older saved record whose tag binding coexisted with the
+        # pre-binding simulation-only status.
+        self.cell.bins["bin-a"]["positionStatus"] = "simulation_only"
+        self.cell._save_locked()
+        reloaded = Workcell(Path(self.temp.name))
+        bin_obj = reloaded.bins["bin-a"]
+        self.assertEqual(bin_obj["trackingMode"], "apriltag")
+        self.assertEqual(bin_obj["positionStatus"], "tag_pending")
+        self.assertEqual(bin_obj["positionSource"], "apriltag")
+
     def test_execution_snapshot_rejects_stale_or_moved_tracked_bin(self):
         self.bind()
         now = time.time()
@@ -175,6 +251,17 @@ class TaggedBinUiContractTests(unittest.TestCase):
         self.assertIn("position.body.append(tracked);", source)
         self.assertNotIn("positionGrid.append(tracked);", source)
         self.assertIn("is providing a fresh physical position and rotation", source)
+
+    def test_programmer_keeps_push_to_talk_available(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "static" / "index.html").read_text()
+        realtime = (root / "static" / "js" / "realtime.js").read_text()
+        self.assertIn('id="programRealtimeTalkBtn"', html)
+        self.assertIn('id="programRealtimeStatus"', html)
+        self.assertIn('$("#programRealtimeTalkBtn")', realtime)
+        self.assertIn('$("#programRealtimeStatus")', realtime)
+        self.assertIn('id="programRealtimeConversationBtn"', html)
+        self.assertIn('$("#programRealtimeConversationBtn")', realtime)
 
 
 if __name__ == "__main__":

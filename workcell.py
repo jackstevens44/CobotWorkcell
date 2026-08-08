@@ -467,6 +467,10 @@ class Workcell:
                 bin_obj.update({
                     "trackingMode": "apriltag", "tagId": definition["tagId"],
                     "trackingState": "not_visible", "poseFresh": False,
+                    # A bound bin is neither a manually verified fixed bin nor
+                    # a simulation-only bin. Its physical usability is derived
+                    # from the freshness of the live tag pose.
+                    "positionStatus": "tag_pending", "positionSource": "apriltag",
                 })
         self.support_surfaces = {}
         for item in records("supportSurfaces"):
@@ -892,6 +896,28 @@ class Workcell:
                 return False
             time.sleep(0.05)
 
+    def wait_for_bin_pose(self, bin_id: str, timeout_s: float = 0.5) -> bool:
+        """Briefly wait for an observed bin tag to finish pose stabilization."""
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while True:
+            with self.lock:
+                bin_obj = self.bins.get(str(bin_id))
+                if self._bin_pose_is_fresh_locked(bin_obj):
+                    return True
+                retention_s, _ = self._tag_tracking_limits()
+                observed_at = float((bin_obj or {}).get("lastObservedAt") or 0.0)
+                tracking_state = str((bin_obj or {}).get("trackingState") or "")
+                may_recover = bool(
+                    observed_at
+                    and time.time() - observed_at <= retention_s
+                    and tracking_state in {
+                        "degraded_recent", "stabilizing", "observed_unlocalized",
+                    }
+                )
+            if not may_recover or time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
     def tag_pose_unavailable_error(self, part_id: str) -> str:
         with self.lock:
             definition = self.registered_parts.get(str(part_id)) or {}
@@ -924,6 +950,59 @@ class Workcell:
                     f"{max(0.0, time.time() - localized_at):.1f} seconds."
                 )
             return f"{label} is registered, but {prefix} has not produced a valid pose."
+
+    def bin_pose_unavailable_error(self, bin_id: str) -> str:
+        with self.lock:
+            definition = self.registered_bins.get(str(bin_id)) or {}
+            bin_obj = self.bins.get(str(bin_id)) or {}
+            label = str(definition.get("label") or bin_obj.get("label") or bin_id)
+            tag_id = definition.get("tagId", bin_obj.get("tagId"))
+            prefix = f"Tag {tag_id}" if tag_id is not None else label
+            rejection = bin_obj.get("localizationRejection") or {}
+            reason = str(rejection.get("reason") or "")
+            progress = rejection.get("stabilizationProgress") or {}
+            if reason == "support_surface_stabilizing":
+                frames = int(progress.get("frames") or 0)
+                required = int(progress.get("required") or 3)
+                return (
+                    f"{label}: {prefix} was detected, but its support-surface pose is "
+                    f"stabilizing ({frames}/{required} frames)."
+                )
+            residual = rejection.get("nearestSurfaceResidualM")
+            if reason and residual is not None:
+                correction = ""
+                nearest_surface_id = str(rejection.get("nearestSurfaceId") or "")
+                nearest_surface = self.support_surfaces.get(nearest_surface_id) or {}
+                measured_tag_z = rejection.get("measuredTagTopZ")
+                if reason == "support_surface_unknown" and measured_tag_z is not None and nearest_surface:
+                    configured_mount_m = float(definition.get("mountHeightM") or 0.0)
+                    estimated_mount_m = max(
+                        0.0,
+                        float(measured_tag_z) - float(nearest_surface.get("topZ") or 0.0),
+                    )
+                    correction = (
+                        f" Configured tag mounting height is {configured_mount_m * 1000.0:.1f} mm, "
+                        f"while the camera estimates the tag plane near {estimated_mount_m * 1000.0:.1f} mm "
+                        f"above {nearest_surface.get('name') or nearest_surface_id}. Update Tag mounting "
+                        "height to the tag's actual height above the bin base."
+                    )
+                return (
+                    f"{label}: {prefix} is visible but localization was rejected ({reason}); "
+                    f"nearest surface-height residual is {float(residual) * 1000.0:.1f} mm."
+                    f"{correction}"
+                )
+            if reason:
+                return f"{label}: {prefix} is visible but localization was rejected: {reason}."
+            localized_at = float(bin_obj.get("lastLocalizedAt") or 0.0)
+            if localized_at:
+                return (
+                    f"{label}: {prefix} has not produced a valid pose for "
+                    f"{max(0.0, time.time() - localized_at):.1f} seconds."
+                )
+            observed_at = float(bin_obj.get("lastObservedAt") or 0.0)
+            if observed_at:
+                return f"{label}: {prefix} is visible but has not produced its first valid pose."
+            return f"{label} is AprilTag-bound, but {prefix} is not currently visible."
 
     def ingest_tag_tracks(
         self, detections: List[Dict[str, Any]], timestamp: Optional[float] = None,
@@ -1336,6 +1415,10 @@ class Workcell:
                 # Camera pose is authoritative while a bin is tag tracked.
                 bin_obj["position"] = deepcopy(existing.get("position"))
                 bin_obj["orientationDeg"] = existing.get("orientationDeg", 0.0)
+                bin_obj["positionStatus"] = (
+                    "tag_tracked" if self._bin_pose_is_fresh_locked(existing) else "tag_pending"
+                )
+                bin_obj["positionSource"] = "camera" if bin_obj["positionStatus"] == "tag_tracked" else "apriltag"
                 for key in (
                     "trackingMode", "tagId", "trackingState", "poseFresh", "displayVisible",
                     "lastSeenAt", "lastObservedAt", "lastLocalizedAt", "poseQuality",
@@ -1362,6 +1445,13 @@ class Workcell:
             self.invalidate_compiled_cycles_locked("bin_changed")
             self._save_locked()
             return {**self.snapshot_locked(), "bin": self._bin_with_geometry(bin_obj)}
+
+    def _bin_position_is_physically_usable_locked(self, bin_obj: Optional[Dict[str, Any]]) -> bool:
+        if not bin_obj:
+            return False
+        if bin_obj.get("trackingMode") == "apriltag":
+            return self._bin_pose_is_fresh_locked(bin_obj)
+        return bin_obj.get("positionStatus") == "operator_verified"
 
     def delete_bin(self, bin_id: str) -> Dict[str, Any]:
         with self.lock:
@@ -1925,7 +2015,7 @@ class Workcell:
                 if bin_obj is None:
                     return {"ok": False, "error": "Destination bin was not found."}
                 if bin_obj.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(bin_obj):
-                    return {"ok": False, "error": f"{bin_obj.get('label') or bin_obj['id']} does not have a fresh AprilTag pose."}
+                    return {"ok": False, "error": self.bin_pose_unavailable_error(bin_obj["id"])}
                 geometry = self.bin_geometry(bin_obj)
                 part_hx, part_hy = self._entity_footprint(entity)
                 if (
@@ -2023,7 +2113,11 @@ class Workcell:
                             "code": "outside_calibrated_workspace",
                             "message": f"{entity.get('label') or entity['id']} is outside the calibrated workspace bounds.",
                         })
-                if entity.get("kind") == "bin" and entity.get("positionStatus") == "simulation_only":
+                if (
+                    entity.get("kind") == "bin"
+                    and entity.get("trackingMode") != "apriltag"
+                    and entity.get("positionStatus") == "simulation_only"
+                ):
                     availability_warnings.append({
                         "entityId": entity["id"],
                         "code": "simulation_only",
@@ -2992,7 +3086,7 @@ class Workcell:
                 if destination.get("kind") == "bin":
                     destination_bin = destination["bin"]
                     if destination_bin.get("trackingMode") == "apriltag" and not self._bin_pose_is_fresh_locked(destination_bin):
-                        return {"ok": False, "error": f"{destination_bin.get('label') or destination_bin['id']} does not have a fresh AprilTag pose."}
+                        return {"ok": False, "error": self.bin_pose_unavailable_error(destination_bin["id"])}
                     destination_snapshots[destination_bin["id"]] = {
                         "kind": "bin",
                         "id": destination_bin["id"],
@@ -3003,7 +3097,10 @@ class Workcell:
                         "lastLocalizedAt": destination_bin.get("lastLocalizedAt"),
                         "supportSurfaceId": destination_bin.get("supportSurfaceId"),
                     }
-                    if destination_bin.get("positionStatus") == "simulation_only":
+                    if (
+                        destination_bin.get("trackingMode") != "apriltag"
+                        and destination_bin.get("positionStatus") == "simulation_only"
+                    ):
                         notes.append(
                             f"{destination_bin['label']} was moved only in the simulation; "
                             "confirm its physical position before running this plan."
@@ -3163,7 +3260,11 @@ class Workcell:
             notes.append(f"Coordinate preflight failed: {message}")
         unverified_destinations = [
             snapshot for snapshot in destination_snapshots.values()
-            if snapshot.get("kind") == "bin" and snapshot.get("positionStatus") != "operator_verified"
+            if (
+                snapshot.get("kind") == "bin"
+                and snapshot.get("trackingMode") != "apriltag"
+                and snapshot.get("positionStatus") != "operator_verified"
+            )
         ]
         physical_ready = not requires_captured_tool_rpy and not preflight_errors and not unverified_destinations
         with self.lock:
