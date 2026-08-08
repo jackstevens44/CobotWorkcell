@@ -4126,9 +4126,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         safety = payload.get("safetyGate")
         if isinstance(safety, dict):
             safety.pop("physicalConfirmToken", None)
-            safety["voiceRunFlow"] = "Say 'run it'; then answer yes or no once."
+            safety["voiceRunFlow"] = "After reviewing this preview, say 'run it' once."
             safety["reason"] = (
-                "Physical execution requires one explicit yes/no confirmation after the run request."
+                "Saying 'run it' while this validated preview is current is the explicit physical confirmation."
             )
         return payload
 
@@ -4151,10 +4151,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "expiresInSeconds": REALTIME_PLAN_TTL_S,
             "executionGate": {
                 "requiresPlanId": True,
-                "requiresVerbalYes": True,
-                "note": "Say 'run it', then answer the single yes/no confirmation.",
+                "requiresDirectRunCommand": True,
+                "note": "Review the preview, then say 'run it' to execute it once.",
             },
         }
+
+    def run_validated_voice_program(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Consume and execute the exact preview explicitly named by a voice tool call."""
+        realtime_plan_id = str(arguments.get("realtimePlanId") or "")
+        if not realtime_plan_id:
+            return {
+                "ok": False,
+                "error": "No validated preview was identified. Plan and simulate the program first.",
+            }
+        with self.realtime_plan_lock:
+            self.prune_realtime_plans()
+            realtime_record = self.realtime_plans.pop(realtime_plan_id, None)
+        if realtime_record is None:
+            return {
+                "ok": False,
+                "error": "That preview expired or was already used. Plan and simulate it again.",
+            }
+        plan = realtime_record.get("plan") or {}
+        if not plan.get("ok") or not (plan.get("steps") or []):
+            self.scene.release_plan_reservations(plan)
+            return {
+                "ok": False,
+                "error": "The selected preview is not a complete validated program.",
+            }
+        saved_program = self.resolve_saved_program({"name": plan.get("program")})
+        if saved_program is not None and realtime_record.get("source") != "plan_home_zero":
+            program = {**saved_program, "realtimePlanId": realtime_plan_id}
+        else:
+            program = {
+                "id": None,
+                "name": str(plan.get("program") or "Current preview"),
+                "temporaryPreview": True,
+                "realtimePlanId": realtime_plan_id,
+            }
+        result = self.execute_validated_plan(plan, PHYSICAL_CONFIRM_TOKEN)
+        return {"program": program, "previewConsumed": True, **result}
 
     def execute_realtime_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -4487,6 +4523,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self.remember_realtime_plan(self.plan_program_request(arguments), "plan_program")
             if name in ("save_program", "save_current_program", "click_save_button", "save_program_to_dashboard"):
                 return self.save_realtime_program(arguments)
+            if name == "run_validated_program":
+                return self.run_validated_voice_program(arguments)
             if name == "request_program_run":
                 return self.request_voice_program_run(arguments)
             if name == "confirm_program_run":
@@ -4545,21 +4583,23 @@ def create_openai_realtime_call(api_key: str, sdp: str) -> str:
             "Default to one short sentence. NEVER speak before calling a tool. Forbidden filler includes 'Okay', 'Alright', 'Got it', 'I will', and 'let me'. "
             "Never narrate tool calls, restate the request, recap steps, or offer extra options unless asked.\n"
             "# Spatial grounding\n"
-            "Before any spatial command, call get_spatial_context. Robot frame: +X front, -X back, +Y left, -Y right, +Z up. "
+            "Before any spatial command or claim about what is currently in the workcell, call get_spatial_context. Robot frame: +X front, -X back, +Y left, -Y right, +Z up. "
             "Use exact IDs returned by tools. Read availabilityWarnings, but mention only a warning that blocks the requested action. "
             "Never calculate, infer, or invent XYZ coordinates yourself. Hidden tagged parts have no usable location. "
             "Do not call get_spatial_context for home, run confirmation, stop, or robot-status requests.\n"
             "# Planning\n"
             "For requests such as move a part right, next to something, to a taught point, or into a bin, call plan_spatial_move. "
             "For go-to-point requests call plan_move_to_point. Tool results create the dashboard program and simulation. "
+            "Any request to create, edit, or save a program must use plan_program, plan_spatial_move, plan_pick_place, or save_program. Never claim a program or workspace observation exists without the corresponding tool result. "
             "Call planning tools silently with no preceding audio. Wait for each result before speaking or trying another destination. On success say exactly 'Plan ready.' "
             "On failure state only the specific blocker. Never claim a tool is still running after it returned. "
             "Named-region and relative moves create a transient server-calculated destination. Persistent taught points can only be created from measured robot capture, never from model reasoning. "
             "A simulation_only bin is not a verified physical destination. update_virtual_layout moves only the digital bin and must be described that way.\n"
             "# Safety\n"
-            "Do not move the physical robot unless the user explicitly requests the current plan to run. Preserve the realtimePlanId returned by every planning tool. "
-            "For 'run that' or equivalent, call request_program_run with that realtimePlanId with no preceding audio. Ask exactly the returned short confirmation question once. "
-            "After a clear yes, call confirm_program_run immediately with no preceding audio, then say exactly 'Run complete.' or the exact failure. Never ask for a program name when a realtimePlanId exists. "
+            "Do not move the physical robot unless the user gives a direct imperative to execute the current visible validated preview. Preserve the realtimePlanId returned by every planning tool. "
+            "After the preview is shown, phrases such as 'run it', 'run the program', 'execute the current plan', or 'start the robot' are the one explicit confirmation: call run_validated_program immediately with that exact realtimePlanId and no preceding audio. "
+            "Do not run for questions, hypothetical or quoted wording, or negated phrases such as 'don't run it'. Do not ask 'are you sure' after a direct run command. "
+            "After the tool returns, say exactly 'Run complete.' or the exact failure. Never ask for a program name when a realtimePlanId exists. "
             "Never request arbitrary joint angles or reveal internal confirmation tokens. "
             "Stop is always allowed. Gripper open/close is allowed only when explicitly requested.\n"
             "# Classification\n"
@@ -4682,7 +4722,7 @@ def create_openai_realtime_call(api_key: str, sdp: str) -> str:
             {
                 "type": "function",
                 "name": "plan_pick_place",
-                "description": "Create and save a dashboard program that picks a scene part and places it in a bin, then returns a plan preview. Does not move the physical robot until request_program_run and confirm_program_run are used.",
+                "description": "Create and save a dashboard program that picks a scene part and places it in a bin, then returns a plan preview. This function call is required to create the program and never moves the physical robot.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -4769,29 +4809,14 @@ def create_openai_realtime_call(api_key: str, sdp: str) -> str:
             },
             {
                 "type": "function",
-                "name": "request_program_run",
-                "description": "Stage the current preview or a saved dashboard program for physical execution and return a pendingRunId. Prefer the realtimePlanId from the most recent planning result. This does not move the robot; ask one short yes/no question before confirming.",
+                "name": "run_validated_program",
+                "description": "Execute the exact current validated preview after the user directly says to run it. The direct run command is the single confirmation. Never call for questions, hypothetical wording, quoted wording, or negated commands.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "realtimePlanId": {"type": "string"},
-                        "programId": {"type": "string"},
-                        "name": {"type": "string"},
                     },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "type": "function",
-                "name": "confirm_program_run",
-                "description": "Execute a previously staged physical robot run after the user verbally confirms yes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pendingRunId": {"type": "string"},
-                        "answer": {"type": "string", "enum": ["yes", "no"]},
-                    },
-                    "required": ["pendingRunId", "answer"],
+                    "required": ["realtimePlanId"],
                     "additionalProperties": False,
                 },
             },

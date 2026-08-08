@@ -12,6 +12,8 @@ const realtime = {
   remoteStream: null,
   connected: false,
   talking: false,
+  conversationActive: false,
+  userSpeaking: false,
   talkStartedAt: 0,
   responseActive: false,
   responseCreatePending: false,
@@ -35,8 +37,14 @@ const PLANNING_TOOLS = new Set([
 const $ = (sel) => document.querySelector(sel);
 
 function setRealtimeStatus(message) {
-  const el = $("#realtimeStatus");
-  if (el) el.textContent = message;
+  for (const el of [$("#realtimeStatus"), $("#programRealtimeStatus")]) {
+    if (el) el.textContent = message;
+  }
+}
+
+function idleRealtimeStatus() {
+  if (!realtime.connected) return "Disconnected.";
+  return realtime.conversationActive ? "Conversation active. Listening..." : "Connected. Hold to Talk.";
 }
 
 function appendOutput(text) {
@@ -113,21 +121,98 @@ async function syncSavedProgramResult(result) {
   updateStatus(`Saved program ${result.program.name}.`);
 }
 
-function syncPendingRunResult(result) {
-  if (!result.program || !result.plan) return;
-  showPlanInProgramPanel(result.plan, result.program);
-  updateStatus(`Ready to run ${result.program.name}; waiting for voice confirmation.`);
-}
-
 function setButtonState() {
   const connectBtn = $("#realtimeConnectBtn");
-  const talkBtn = $("#realtimeTalkBtn");
   if (connectBtn) connectBtn.textContent = realtime.connected ? "Disconnect" : "Connect";
-  if (talkBtn) {
-    talkBtn.disabled = !realtime.connected;
+  for (const talkBtn of [$("#realtimeTalkBtn"), $("#programRealtimeTalkBtn")]) {
+    if (!talkBtn) continue;
+    talkBtn.disabled = !realtime.connected || realtime.conversationActive;
     talkBtn.textContent = realtime.talking ? "Listening… Release to Send" : "Hold to Talk";
     talkBtn.classList.toggle("listening", realtime.talking);
   }
+  for (const conversationBtn of [$("#realtimeConversationBtn"), $("#programRealtimeConversationBtn")]) {
+    if (!conversationBtn) continue;
+    conversationBtn.disabled = !realtime.connected || realtime.talking;
+    conversationBtn.textContent = realtime.conversationActive ? "End Conversation" : "Start Conversation";
+    conversationBtn.classList.toggle("listening", realtime.conversationActive);
+    conversationBtn.setAttribute("aria-pressed", realtime.conversationActive ? "true" : "false");
+  }
+}
+
+function setMicrophoneEnabled(enabled) {
+  for (const track of realtime.stream?.getAudioTracks?.() || []) {
+    track.enabled = enabled;
+  }
+}
+
+function setConversationTurnDetection(enabled) {
+  sendRealtimeEvent({
+    type: "session.update",
+    session: {
+      type: "realtime",
+      audio: {
+        input: {
+          turn_detection: enabled ? {
+            type: "semantic_vad",
+            eagerness: "medium",
+            create_response: true,
+            interrupt_response: true,
+          } : null,
+        },
+      },
+    },
+  });
+}
+
+function startConversation() {
+  if (!realtime.connected || realtime.conversationActive) return;
+  realtime.conversationActive = true;
+  realtime.userSpeaking = false;
+  sendRealtimeEvent({ type: "input_audio_buffer.clear" });
+  setConversationTurnDetection(true);
+  setMicrophoneEnabled(true);
+  setRealtimeStatus("Conversation active. Listening...");
+  setButtonState();
+}
+
+function stopConversation(message = "Connected. Hold to Talk.") {
+  if (!realtime.conversationActive) return;
+  setMicrophoneEnabled(false);
+  realtime.conversationActive = false;
+  realtime.userSpeaking = false;
+  setConversationTurnDetection(false);
+  sendRealtimeEvent({ type: "input_audio_buffer.clear" });
+  setRealtimeStatus(message);
+  setButtonState();
+}
+
+function toggleConversation() {
+  if (realtime.conversationActive) stopConversation();
+  else startConversation();
+}
+
+function bindHoldToTalkButton(talkBtn) {
+  if (!talkBtn) return;
+  talkBtn.addEventListener("pointerdown", beginTalk);
+  talkBtn.addEventListener("pointerup", endTalk);
+  talkBtn.addEventListener("pointercancel", endTalk);
+  talkBtn.addEventListener("lostpointercapture", endTalk);
+  talkBtn.addEventListener("keydown", (event) => {
+    if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+      event.preventDefault();
+      beginTalk(event);
+    }
+  });
+  talkBtn.addEventListener("keyup", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      endTalk();
+    }
+  });
+}
+
+function bindConversationButton(button) {
+  if (button) button.addEventListener("click", toggleConversation);
 }
 
 function flushResponseCreate() {
@@ -163,7 +248,7 @@ async function handleEvent(event) {
   if (event.type === "response.created") {
     realtime.responseCreatePending = false;
     realtime.responseActive = true;
-    if (realtime.cancelWhenCreated || realtime.talking) {
+    if (realtime.cancelWhenCreated || realtime.talking || realtime.userSpeaking) {
       realtime.cancelWhenCreated = false;
       sendRealtimeEvent({ type: "response.cancel", response_id: event.response?.id });
     }
@@ -175,8 +260,14 @@ async function handleEvent(event) {
   if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) {
     appendOutput(`\nYou: ${event.transcript}\n`);
   }
-  if (event.type === "input_audio_buffer.speech_started") setRealtimeStatus("Listening...");
-  if (event.type === "input_audio_buffer.speech_stopped") setRealtimeStatus("Thinking...");
+  if (event.type === "input_audio_buffer.speech_started") {
+    realtime.userSpeaking = true;
+    setRealtimeStatus("Listening...");
+  }
+  if (event.type === "input_audio_buffer.speech_stopped") {
+    realtime.userSpeaking = false;
+    setRealtimeStatus("Thinking...");
+  }
   if (event.type === "response.audio.delta" || event.type === "response.output_audio.delta") {
     realtime.outputPlaying = true;
     setRealtimeStatus("Speaking...");
@@ -208,9 +299,9 @@ async function handleEvent(event) {
     if (sentToolOutput) requestResponseCreate();
     else flushResponseCreate();
     if (
-      realtime.connected && !realtime.talking
+      realtime.connected && !realtime.talking && !realtime.userSpeaking
       && !realtime.responseActive && !realtime.responseCreatePending && !realtime.responseRequested
-    ) setRealtimeStatus("Connected. Hold to Talk.");
+    ) setRealtimeStatus(idleRealtimeStatus());
   }
 }
 
@@ -232,8 +323,7 @@ async function runTool(item) {
       const draft = args.steps ? { name: args.name || result.program, steps: args.steps } : null;
       showPlanInProgramPanel(result, draft);
     } else if (result.ok && result.plan?.steps) {
-      if (item.name === "request_program_run") syncPendingRunResult(result);
-      else if (result.program) await syncSavedProgramResult(result);
+      if (result.program) await syncSavedProgramResult(result);
       else showPlanInProgramPanel(result.plan);
     }
     if (item.name === "update_virtual_layout" && result.ok) {
@@ -246,7 +336,7 @@ async function runTool(item) {
         // The normal scene poll will recover if this one refresh fails.
       }
     }
-    if (item.name === "confirm_program_run" && result.executedSteps) {
+    if (item.name === "run_validated_program") {
       const output = $("#planOutput");
       if (output) {
         const status = result.ok ? "Voice physical run finished." : `Voice physical run failed: ${result.error || "unknown error"}`;
@@ -327,7 +417,7 @@ async function connect() {
   realtime.dc = realtime.pc.createDataChannel("oai-events");
   realtime.dc.addEventListener("open", () => {
     realtime.connected = true;
-    setRealtimeStatus("Connected. Hold to Talk.");
+    setRealtimeStatus(idleRealtimeStatus());
     setButtonState();
   });
   realtime.dc.addEventListener("message", (event) => {
@@ -370,6 +460,8 @@ function disconnect(message = "Disconnected.") {
   realtime.remoteStream = null;
   realtime.connected = false;
   realtime.talking = false;
+  realtime.conversationActive = false;
+  realtime.userSpeaking = false;
   realtime.talkStartedAt = 0;
   realtime.responseActive = false;
   realtime.responseCreatePending = false;
@@ -388,13 +480,13 @@ function sendRealtimeEvent(payload) {
 }
 
 function beginTalk(event) {
-  if (!realtime.connected || realtime.talking) return;
+  if (!realtime.connected || realtime.talking || realtime.conversationActive) return;
   if (event?.pointerId !== undefined) event.currentTarget?.setPointerCapture?.(event.pointerId);
   realtime.talking = true;
   realtime.talkStartedAt = performance.now();
   interruptActiveResponse();
   sendRealtimeEvent({ type: "input_audio_buffer.clear" });
-  for (const track of realtime.stream?.getAudioTracks?.() || []) track.enabled = true;
+  setMicrophoneEnabled(true);
   setRealtimeStatus("Listening...");
   setButtonState();
 }
@@ -402,7 +494,7 @@ function beginTalk(event) {
 function endTalk() {
   if (!realtime.connected || !realtime.talking) return;
   realtime.talking = false;
-  for (const track of realtime.stream?.getAudioTracks?.() || []) track.enabled = false;
+  setMicrophoneEnabled(false);
   const durationMs = performance.now() - realtime.talkStartedAt;
   realtime.talkStartedAt = 0;
   if (durationMs < MIN_PUSH_TO_TALK_MS) {
@@ -445,23 +537,10 @@ export async function initRealtime() {
   $("#realtimeConnectBtn").addEventListener("click", () => {
     connect().catch((error) => setRealtimeStatus(error.message));
   });
-  const talkBtn = $("#realtimeTalkBtn");
-  talkBtn.addEventListener("pointerdown", beginTalk);
-  talkBtn.addEventListener("pointerup", endTalk);
-  talkBtn.addEventListener("pointercancel", endTalk);
-  talkBtn.addEventListener("lostpointercapture", endTalk);
-  talkBtn.addEventListener("keydown", (event) => {
-    if ((event.key === " " || event.key === "Enter") && !event.repeat) {
-      event.preventDefault();
-      beginTalk(event);
-    }
-  });
-  talkBtn.addEventListener("keyup", (event) => {
-    if (event.key === " " || event.key === "Enter") {
-      event.preventDefault();
-      endTalk();
-    }
-  });
+  bindHoldToTalkButton($("#realtimeTalkBtn"));
+  bindHoldToTalkButton($("#programRealtimeTalkBtn"));
+  bindConversationButton($("#realtimeConversationBtn"));
+  bindConversationButton($("#programRealtimeConversationBtn"));
   $("#realtimeSendBtn").addEventListener("click", sendText);
   $("#realtimePromptInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {

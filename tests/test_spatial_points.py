@@ -327,9 +327,22 @@ class RealtimeConfigurationTests(unittest.TestCase):
         self.assertIn('"turn_detection": None', server)
         self.assertIn("OPENAI_REALTIME_MODEL=gpt-realtime-2.1", example)
         self.assertIn("track.enabled = false", client)
-        self.assertLess(client.index('type: "input_audio_buffer.clear"'), client.index("track.enabled = true"))
+        begin_talk = client.index("function beginTalk")
+        self.assertLess(
+            client.index('type: "input_audio_buffer.clear"', begin_talk),
+            client.index("setMicrophoneEnabled(true)", begin_talk),
+        )
         self.assertLess(client.index('type: "input_audio_buffer.commit"'), client.index("requestResponseCreate();", client.index("function endTalk")))
         self.assertIn("MIN_PUSH_TO_TALK_MS = 200", client)
+        self.assertIn("conversationActive: false", client)
+        self.assertIn('type: "semantic_vad"', client)
+        self.assertIn("function startConversation()", client)
+        self.assertIn("function stopConversation", client)
+        self.assertIn("realtime.conversationActive ? \"End Conversation\" : \"Start Conversation\"", client)
+        self.assertIn("Any request to create, edit, or save a program must use", server)
+        self.assertIn("call get_spatial_context", server)
+        self.assertIn("call run_validated_program immediately", server)
+        self.assertNotIn('"name": "confirm_program_run"', server)
         self.assertIn("if (realtime.responseActive)", client)
         self.assertNotIn('event.type === "response.output_item.done"', client)
         self.assertIn('event.type === "response.done"', client)

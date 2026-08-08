@@ -362,6 +362,7 @@
               <div class="inline-row realtime-controls">
                 <button id="realtimeConnectBtn" type="button">Connect</button>
                 <button id="realtimeTalkBtn" type="button" class="primary" disabled>Hold to Talk</button>
+                <button id="realtimeConversationBtn" type="button" disabled aria-pressed="false">Start Conversation</button>
                 <button id="realtimeSendBtn" type="button" class="primary">Send</button>
               </div>
               <audio id="realtimeAudio" autoplay playsinline></audio>
@@ -435,6 +436,11 @@
             <span id="programConnectionState" class="status-pill">Offline</span>
             <span id="programToolState">Adaptive Gripper</span>
             <label>Speed override <input id="programSpeedOverride" type="range" min="1" max="100" value="100"><output id="programSpeedOutput">100%</output></label>
+          </div>
+          <div class="program-realtime-controls">
+            <span id="programRealtimeStatus">Voice disconnected.</span>
+            <button id="programRealtimeTalkBtn" type="button" disabled>Hold to Talk</button>
+            <button id="programRealtimeConversationBtn" type="button" disabled aria-pressed="false">Start Conversation</button>
           </div>
           <span id="runStatus" class="program-run-status"></span>
           <div class="program-footer-actions">
