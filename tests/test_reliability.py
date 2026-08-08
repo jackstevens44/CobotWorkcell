@@ -218,6 +218,37 @@ class VoiceExecutionGateTests(unittest.TestCase):
         self.assertIn("No validated preview", result["error"])
         self.handler.service.execute_pick_plan.assert_not_called()
 
+    def test_cached_legacy_request_with_preview_id_uses_single_confirmation(self):
+        plan = {
+            "ok": True,
+            "program": "voice home",
+            "steps": [{"stateId": "seq01_home", "name": "home", "robotCommand": "home"}],
+        }
+        remembered = self.handler.remember_realtime_plan(plan, "plan_home_zero")
+        self.handler.execute_validated_plan = MagicMock(return_value={"ok": True})
+
+        result = self.handler.run_realtime_tool({
+            "name": "request_program_run",
+            "arguments": {"realtimePlanId": remembered["realtimePlanId"]},
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["previewConsumed"])
+        self.handler.execute_validated_plan.assert_called_once_with(
+            plan, "RUN_PHYSICAL_PICK"
+        )
+        self.assertNotIn("confirmationPrompt", result)
+
+    def test_cached_legacy_request_without_preview_id_never_stages_confirmation(self):
+        result = self.handler.run_realtime_tool({
+            "name": "request_program_run",
+            "arguments": {},
+        })
+        self.assertFalse(result["ok"])
+        self.assertIn("outdated", result["error"])
+        self.assertNotIn("confirmationPrompt", result)
+        self.handler.service.execute_pick_plan.assert_not_called()
+
     def test_legacy_saved_program_tool_only_stages_a_run(self):
         self.handler.request_voice_program_run = MagicMock(return_value={"ok": True, "pendingRunId": "pending"})
         result = self.handler.execute_saved_program({"programId": "p1", "answer": "yes", "confirm": "RUN_PHYSICAL_PICK"})

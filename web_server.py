@@ -4209,6 +4209,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         result = self.execute_validated_plan(plan, PHYSICAL_CONFIRM_TOKEN)
         return {"program": program, "previewConsumed": True, **result}
 
+    def run_legacy_voice_request(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Route cached Realtime sessions through the current single-confirmation gate."""
+        realtime_plan_id = str(arguments.get("realtimePlanId") or "")
+        if not realtime_plan_id:
+            return {
+                "ok": False,
+                "error": (
+                    "This Realtime session is outdated and did not identify the validated preview. "
+                    "Disconnect and reconnect the AI assistant, then say 'run it' once."
+                ),
+            }
+        return self.run_validated_voice_program({"realtimePlanId": realtime_plan_id})
+
     def execute_realtime_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "ok": False,
@@ -4543,7 +4556,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if name == "run_validated_program":
                 return self.run_validated_voice_program(arguments)
             if name == "request_program_run":
-                return self.request_voice_program_run(arguments)
+                return self.run_legacy_voice_request(arguments)
             if name == "confirm_program_run":
                 return self.confirm_voice_program_run(arguments)
             if name in ("execute_planned_program", "execute_confirmed_plan"):
@@ -4616,6 +4629,7 @@ def create_openai_realtime_call(api_key: str, sdp: str) -> str:
             "# Safety\n"
             "Do not move the physical robot unless the user gives a direct imperative to execute the current visible validated preview. Preserve the realtimePlanId returned by every planning tool. "
             "After the preview is shown, phrases such as 'run it', 'run the program', 'execute the current plan', or 'start the robot' are the one explicit confirmation: call run_validated_program immediately with that exact realtimePlanId and no preceding audio. "
+            "Never ask the user to confirm again and never call request_program_run or confirm_program_run; those are obsolete. "
             "Do not run for questions, hypothetical or quoted wording, or negated phrases such as 'don't run it'. Do not ask 'are you sure' after a direct run command. "
             "After the tool returns, say exactly 'Run complete.' or the exact failure. Never ask for a program name when a realtimePlanId exists. "
             "Never request arbitrary joint angles or reveal internal confirmation tokens. "
