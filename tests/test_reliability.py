@@ -185,6 +185,39 @@ class VoiceExecutionGateTests(unittest.TestCase):
         self.assertIn("direct-execution tool is disabled", result["error"])
         self.handler.service.execute_pick_plan.assert_not_called()
 
+    def test_direct_run_consumes_exact_validated_preview_once(self):
+        plan = {
+            "ok": True,
+            "program": "voice home",
+            "steps": [{"stateId": "seq01_home", "name": "home", "robotCommand": "home"}],
+        }
+        remembered = self.handler.remember_realtime_plan(plan, "plan_home_zero")
+        self.handler.execute_validated_plan = MagicMock(return_value={
+            "ok": True,
+            "executedSteps": [{"stateId": "seq01_home"}],
+        })
+
+        result = self.handler.run_validated_voice_program({
+            "realtimePlanId": remembered["realtimePlanId"],
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["previewConsumed"])
+        self.handler.execute_validated_plan.assert_called_once_with(
+            plan, "RUN_PHYSICAL_PICK"
+        )
+        repeated = self.handler.run_validated_voice_program({
+            "realtimePlanId": remembered["realtimePlanId"],
+        })
+        self.assertFalse(repeated["ok"])
+        self.assertIn("already used", repeated["error"])
+
+    def test_direct_run_requires_explicit_preview_id(self):
+        result = self.handler.run_validated_voice_program({})
+        self.assertFalse(result["ok"])
+        self.assertIn("No validated preview", result["error"])
+        self.handler.service.execute_pick_plan.assert_not_called()
+
     def test_legacy_saved_program_tool_only_stages_a_run(self):
         self.handler.request_voice_program_run = MagicMock(return_value={"ok": True, "pendingRunId": "pending"})
         result = self.handler.execute_saved_program({"programId": "p1", "answer": "yes", "confirm": "RUN_PHYSICAL_PICK"})
@@ -293,6 +326,14 @@ class FrontendReliabilityTests(unittest.TestCase):
         self.assertIn("received malformed server data", realtime)
         self.assertIn('"required": ["pendingRunId", "answer"]', server)
         self.assertIn('"realtimePlanId": {"type": "string"}', server)
+        self.assertIn('"name": "run_validated_program"', server)
+        self.assertIn('"required": ["realtimePlanId"]', server)
+        self.assertIn('item.name === "run_validated_program"', realtime)
+        self.assertIn('type: "semantic_vad"', realtime)
+        self.assertIn('create_response: true', realtime)
+        self.assertIn('interrupt_response: true', realtime)
+        self.assertIn('$("#programRealtimeTalkBtn")', realtime)
+        self.assertIn('$("#programRealtimeConversationBtn")', realtime)
         self.assertIn("Default to one short sentence", server)
 
 
