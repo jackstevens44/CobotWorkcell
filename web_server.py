@@ -3818,6 +3818,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         for step in steps:
             if step.get("type") == "pick" and step.get("objectId"):
                 self.scene.wait_for_tag_pose(str(step["objectId"]), timeout_s=0.5)
+            if step.get("type") == "place" and step.get("binId"):
+                self.scene.wait_for_bin_pose(str(step["binId"]), timeout_s=0.5)
         status = self.service.status()
         start = status.get("lastAngles") or [0.0] * 6
         start_angles = [float(v) for v in start]
@@ -3996,6 +3998,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "side": arguments.get("side"),
             },
         }
+        destination = request["destination"]
+        if str(destination.get("kind") or "").lower() == "bin" and destination.get("binId"):
+            self.scene.wait_for_bin_pose(str(destination["binId"]), timeout_s=0.5)
         resolved = self.scene.resolve_spatial_destination(request)
         if not resolved.get("ok"):
             return resolved
@@ -4048,6 +4053,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if entity_kind != "bin":
             return {"ok": False, "error": "Only bins can be repositioned by the AI layout tool."}
         bin_id = str(arguments.get("binId") or arguments.get("entityId") or "")
+        current = next(
+            (item for item in (self.scene.snapshot().get("bins") or []) if str(item.get("id")) == bin_id),
+            None,
+        )
+        if current and current.get("trackingMode") == "apriltag":
+            return {
+                "ok": False,
+                "error": (
+                    f"{current.get('label') or bin_id} is controlled by AprilTag {current.get('tagId')}. "
+                    "Move the physical bin, or unbind its tag before changing only the virtual layout."
+                ),
+            }
         resolved = self.scene.resolve_spatial_destination({
             "entityKind": "bin", "entityId": bin_id,
             "destination": arguments.get("destination") or {
@@ -4595,6 +4612,7 @@ def create_openai_realtime_call(api_key: str, sdp: str) -> str:
             "On failure state only the specific blocker. Never claim a tool is still running after it returned. "
             "Named-region and relative moves create a transient server-calculated destination. Persistent taught points can only be created from measured robot capture, never from model reasoning. "
             "A simulation_only bin is not a verified physical destination. update_virtual_layout moves only the digital bin and must be described that way.\n"
+            "A bin with trackingMode apriltag and a fresh tag_tracked pose is a current physical destination; do not describe it as simulation-only.\n"
             "# Safety\n"
             "Do not move the physical robot unless the user gives a direct imperative to execute the current visible validated preview. Preserve the realtimePlanId returned by every planning tool. "
             "After the preview is shown, phrases such as 'run it', 'run the program', 'execute the current plan', or 'start the robot' are the one explicit confirmation: call run_validated_program immediately with that exact realtimePlanId and no preceding audio. "
